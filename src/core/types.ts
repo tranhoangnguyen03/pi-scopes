@@ -1,0 +1,85 @@
+export const SCOPE_SCHEMA_VERSION = 1 as const;
+
+export type ScopeId = string;
+export type ScopeStatus = "active" | "completed" | "partial" | "failed" | "cancelled";
+export type RuntimeState = "active" | "disposed";
+
+export interface ScopeBudget {
+  timeoutMs: number;
+}
+
+export interface ScopeRecord {
+  schemaVersion: typeof SCOPE_SCHEMA_VERSION;
+  id: ScopeId;
+  parentId: ScopeId | null;
+  kind: "root" | "subsession";
+  goal: string;
+  status: ScopeStatus;
+  workspaceMode: "host-shared";
+  cwd: string;
+  budget: ScopeBudget;
+  runtime: {
+    state: RuntimeState;
+    scratchPath?: string;
+  };
+  traceRef: string;
+  resultRef?: string;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+}
+
+export interface Evidence {
+  summary: string;
+  source?: string;
+}
+
+export interface ArtifactRef {
+  label: string;
+  ref: string;
+}
+
+export interface ResultCapsuleInput {
+  summary: string;
+  conclusions?: string[];
+  evidence?: Evidence[];
+  artifacts?: ArtifactRef[];
+  decisions?: string[];
+  unresolved?: string[];
+  confidence?: number;
+}
+
+export interface ResultCapsule extends ResultCapsuleInput {
+  status: Exclude<ScopeStatus, "active">;
+  scopeId: ScopeId;
+  traceRef: string;
+  fallbackReason?: string;
+  error?: string;
+}
+
+export interface TraceEvent {
+  schemaVersion: typeof SCOPE_SCHEMA_VERSION;
+  id: string;
+  sequence: number;
+  scopeId: ScopeId;
+  timestamp: string;
+  type: string;
+  data: unknown;
+}
+
+export interface ChildUsage {
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cost: number;
+}
+
+export interface ChildExecutionResult {
+  status: "completed" | "partial" | "failed" | "cancelled";
+  capsuleInput?: ResultCapsuleInput;
+  finalText?: string;
+  error?: string;
+  usage: ChildUsage;
+}
