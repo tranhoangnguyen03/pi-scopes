@@ -141,6 +141,19 @@ export class ScopeStore {
     return `blob://${this.sessionId}/${name}`;
   }
 
+  async readEvidenceBlob(scopeId: string, ref: string): Promise<string | undefined> {
+    const prefix = `blob://${this.sessionId}/`;
+    if (!ref.startsWith(prefix)) return undefined;
+    const name = ref.slice(prefix.length);
+    if (!name.startsWith(`${safeSegment(scopeId)}-`) || !/^[A-Za-z0-9._-]+$/.test(name)) return undefined;
+    try {
+      return await readFile(path.join(this.sessionDir, "blobs", name), "utf8");
+    } catch {
+      // Optional full output: callers explicitly report unavailability and retain the excerpt.
+      return undefined;
+    }
+  }
+
   async saveResult(capsule: ResultCapsule): Promise<string> {
     await writeJsonAtomic(this.resultPath(capsule.scopeId), capsule);
     return this.resultRef(capsule.scopeId);

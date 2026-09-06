@@ -10,6 +10,7 @@ import type { ScopeStore } from "../storage/scope-store.js";
 export interface ForkOptions {
   goal: string;
   timeoutMs?: number;
+  maxTurns?: number;
   parent: Pick<ExtensionContext, "model" | "thinkingLevel">;
   signal?: AbortSignal;
   onActivity?: (scope: ScopeRecord, label: string) => void;
@@ -36,6 +37,10 @@ export class ScopeKernel {
     if (!goal) throw new Error("A child goal is required");
     if (this.activeAbort) throw new Error("v0.1 permits only one active child");
 
+    const maxTurns = options.maxTurns ?? 8;
+    if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 50) {
+      throw new Error("maxTurns must be an integer between 1 and 50");
+    }
     const timeoutMs = options.timeoutMs ?? 15 * 60_000;
     const scopeId = `sc_${randomUUID().replaceAll("-", "").slice(0, 10)}`;
     let scratch: ScratchLease | undefined;
@@ -45,19 +50,22 @@ export class ScopeKernel {
 
     const parentAbort = () => controller.abort(options.signal?.reason);
     options.signal?.addEventListener("abort", parentAbort, { once: true });
+    if (options.signal?.aborted) parentAbort();
     const timeout = setTimeout(() => controller.abort(new Error(`Scope exceeded ${timeoutMs}ms timeout`)), timeoutMs);
 
     try {
       const scratchPath = this.store.scratchPath(scopeId);
       scratch = await acquireScratch(scratchPath);
-      scope = await this.scopes.createChild(scopeId, goal, timeoutMs, scratchPath);
+      scope = await this.scopes.createChild(scopeId, goal, timeoutMs, scratchPath, maxTurns);
       await this.store.appendTrace(scope.id, "scope.fork", {
         parentId: scope.parentId,
         goal: scope.goal,
         workspaceMode: scope.workspaceMode,
         timeoutMs,
+        maxTurns,
       });
 
+      controller.signal.throwIfAborted();
       const execution = await this.childExecutor.run({
         scope,
         parent: options.parent,
@@ -71,7 +79,10 @@ export class ScopeKernel {
         status: execution.status,
         scopeId: scope.id,
         traceRef,
-        ...(execution.status !== "completed" ? { fallbackReason: capsuleInput.unresolved?.[0] ?? "Structured return unavailable." } : {}),
+        usage: execution.usage,
+        ...(execution.fallbackReason ? { fallbackReason: execution.fallbackReason }
+          : execution.status !== "completed" && execution.status !== "partial"
+            ? { fallbackReason: capsuleInput.unresolved?.[0] ?? "Structured return unavailable." } : {}),
         ...(execution.error ? { error: execution.error } : {}),
       };
 

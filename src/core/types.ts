@@ -1,3 +1,5 @@
+import type { Usage } from "@earendil-works/pi-ai";
+
 export const SCOPE_SCHEMA_VERSION = 1 as const;
 
 export type ScopeId = string;
@@ -6,6 +8,7 @@ export type RuntimeState = "active" | "disposed";
 
 export interface ScopeBudget {
   timeoutMs: number;
+  maxTurns?: number;
 }
 
 export interface ScopeRecord {
@@ -55,6 +58,7 @@ export interface ResultCapsule extends ResultCapsuleInput {
   traceRef: string;
   fallbackReason?: string;
   error?: string;
+  usage?: ChildUsage;
 }
 
 export interface TraceEvent {
@@ -67,18 +71,14 @@ export interface TraceEvent {
   data: unknown;
 }
 
-export interface ChildUsage {
+export interface ChildUsage extends Usage {
   turns: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  cost: number;
 }
 
 export interface ChildExecutionResult {
   status: "completed" | "partial" | "failed" | "cancelled";
   capsuleInput?: ResultCapsuleInput;
+  fallbackReason?: string;
   finalText?: string;
   error?: string;
   usage: ChildUsage;

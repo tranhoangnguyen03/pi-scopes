@@ -7,6 +7,7 @@ import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
+  type AgentSession,
   type ExtensionContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -28,23 +29,25 @@ export interface ChildExecutor {
 }
 
 function emptyUsage(): ChildUsage {
-  return { turns: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0 };
+  return {
+    turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
 }
 
-function collectUsage(messages: readonly unknown[]): ChildUsage {
+function collectUsage(session: AgentSession): ChildUsage {
   const total = emptyUsage();
-  for (const message of messages) {
-    if (typeof message !== "object" || message === null || (message as { role?: unknown }).role !== "assistant") continue;
-    const usage = (message as { usage?: Record<string, unknown> }).usage;
+  // Count persisted entries, including history and summary calls removed by compaction.
+  for (const entry of session.sessionManager.getEntries()) {
+    const message = entry.type === "message" ? entry.message : undefined;
+    if (message?.role === "assistant") total.turns += 1;
+    const usage = message?.role === "assistant" || message?.role === "toolResult" ? message.usage
+      : entry.type === "compaction" || entry.type === "branch_summary" ? entry.usage : undefined;
     if (!usage) continue;
-    total.turns += 1;
-    total.inputTokens += typeof usage.input === "number" ? usage.input : 0;
-    total.outputTokens += typeof usage.output === "number" ? usage.output : 0;
-    total.cacheReadTokens += typeof usage.cacheRead === "number" ? usage.cacheRead : 0;
-    total.cacheWriteTokens += typeof usage.cacheWrite === "number" ? usage.cacheWrite : 0;
-    const cost = usage.cost;
-    if (typeof cost === "object" && cost !== null && typeof (cost as { total?: unknown }).total === "number") {
-      total.cost += (cost as { total: number }).total;
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) total[key] += usage[key];
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) total.cost[key] += usage.cost[key];
+    for (const key of ["reasoning", "cacheWrite1h"] as const) {
+      if (usage[key] !== undefined) total[key] = (total[key] ?? 0) + usage[key];
     }
   }
   return total;
@@ -58,6 +61,8 @@ function childInstructions(scope: ScopeRecord): string {
     `Workspace mode: ${scope.workspaceMode}. The workspace is shared with the parent and is not a security boundary.`,
     `Use ${scope.runtime.scratchPath ?? "the assigned scratch directory"} for temporary scripts, downloads, and logs.`,
     "Investigate only the assigned goal. Preserve concrete evidence such as paths, symbols, commands, and test results.",
+    "You do not see the parent conversation. If the goal omits essential context, return partial with the missing information; do not guess the reported problem.",
+    `You have at most ${scope.budget.maxTurns ?? 8} investigation turns. Stop once you have enough evidence; this is an allowance, not a target.`,
     "Do not assume your transcript will enter the parent context.",
     "When done, call scope_return alone. Put everything the parent needs in that bounded capsule.",
   ].join("\n\n");
@@ -69,13 +74,16 @@ export class PiChildExecutor implements ChildExecutor {
   constructor(private readonly store: ScopeStore) {}
 
   async run(request: ChildRunRequest): Promise<ChildExecutionResult> {
+    request.signal.throwIfAborted();
     if (!request.parent.model) {
       return { status: "failed", error: "The parent has no selected model", usage: emptyUsage() };
     }
 
     let captured: ResultCapsuleInput | undefined;
-    const returnTool = createScopeReturnTool((capsule) => {
+    let capturedStatus: "completed" | "partial" = "completed";
+    const returnTool = createScopeReturnTool((capsule, outcome) => {
       captured = capsule;
+      capturedStatus = outcome === "partial" ? "partial" : "completed";
     });
     const scopedBash = createBashToolDefinition(request.scope.cwd, {
       spawnHook: ({ command, cwd, env }) => ({
@@ -132,22 +140,42 @@ export class PiChildExecutor implements ChildExecutor {
     recorder.attach(session, request.onActivity);
     const abort = () => void session.abort();
     request.signal.addEventListener("abort", abort, { once: true });
-    if (request.signal.aborted) abort();
-
+    let turns = 0;
+    let returning = false;
+    let limitReached = false;
+    const unsubscribe = session.subscribe((event) => {
+      if (event.type !== "turn_end" || captured) return;
+      if (++turns >= (returning ? 2 : request.scope.budget.maxTurns ?? 8)) {
+        limitReached = true;
+        // Stop only at a completed turn boundary; keep tool calls/results paired.
+        session.agent.abort();
+      }
+    });
     try {
+      request.signal.throwIfAborted();
       await session.prompt(`Investigate this goal and return a result capsule:\n\n${request.scope.goal}`);
-      const usage = collectUsage(session.messages);
+      if (limitReached && !captured && !request.signal.aborted) {
+        returning = true;
+        turns = 0;
+        await this.store.appendTrace(request.scope.id, "scope.wind_down", { reason: "Investigation turn allowance exhausted" });
+        session.setActiveToolsByName(["scope_return"]);
+        request.signal.throwIfAborted();
+        await session.prompt("Investigation allowance exhausted. No more work tools are available. Call scope_return alone now using only evidence already gathered. Use outcome partial and list unresolved questions if the goal is not answered. You have at most two return turns, including any validation repair.");
+      }
+      const usage = collectUsage(session);
       const finalText = recorder.getFinalText();
       if (request.signal.aborted) {
         return { status: "cancelled", ...(finalText ? { finalText } : {}), usage };
       }
       if (captured) {
-        return { status: "completed", capsuleInput: captured, ...(finalText ? { finalText } : {}), usage };
+        return { status: capturedStatus, capsuleInput: captured, ...(finalText ? { finalText } : {}), usage };
       }
 
+      const fallbackReason = returning ? "The return allowance ended without a valid scope_return." : "The child ended without calling scope_return.";
       return {
         status: finalText ? "partial" : "failed",
-        capsuleInput: fallbackCapsuleInput(finalText, "The child ended without calling scope_return."),
+        fallbackReason,
+        capsuleInput: fallbackCapsuleInput(finalText, fallbackReason),
         ...(finalText ? { finalText } : {}),
         ...(!finalText ? { error: "The child produced no final text or result capsule" } : {}),
         usage,
@@ -155,20 +183,24 @@ export class PiChildExecutor implements ChildExecutor {
     } catch (error) {
       const finalText = recorder.getFinalText();
       if (request.signal.aborted) {
-        return { status: "cancelled", ...(finalText ? { finalText } : {}), usage: collectUsage(session.messages) };
+        return { status: "cancelled", ...(finalText ? { finalText } : {}), usage: collectUsage(session) };
       }
       return {
         status: "failed",
         capsuleInput: fallbackCapsuleInput(finalText, "The child failed before returning a valid capsule."),
         ...(finalText ? { finalText } : {}),
         error: error instanceof Error ? error.message : String(error),
-        usage: collectUsage(session.messages),
+        usage: collectUsage(session),
       };
     } finally {
+      unsubscribe();
       request.signal.removeEventListener("abort", abort);
-      await recorder.flush();
-      recorder.detach();
-      session.dispose();
+      try {
+        await recorder.flush();
+      } finally {
+        recorder.detach();
+        session.dispose();
+      }
     }
   }
 }

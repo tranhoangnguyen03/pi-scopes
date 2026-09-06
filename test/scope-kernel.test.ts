@@ -8,6 +8,10 @@ import { ScopeKernel } from "../src/core/scope-kernel.js";
 import { ScopeStore } from "../src/storage/scope-store.js";
 
 const temporaryDirectories: string[] = [];
+const zeroUsage = {
+  turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 const parent = { model: {} } as Pick<ExtensionContext, "model" | "thinkingLevel">;
 
 afterEach(async () => {
@@ -32,7 +36,7 @@ describe("ScopeKernel", () => {
         return {
           status: "completed",
           capsuleInput: { summary: "usable", evidence: [{ summary: "checked" }] },
-          usage: { turns: 1, inputTokens: 10, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0.01 },
+          usage: { ...zeroUsage, turns: 1, input: 10, output: 4, totalTokens: 14, cost: { ...zeroUsage.cost, total: 0.01 } },
         };
       },
     };
@@ -59,7 +63,7 @@ describe("ScopeKernel", () => {
         }
         return {
           status: "cancelled",
-          usage: { turns: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0 },
+          usage: zeroUsage,
         };
       },
     };
@@ -82,7 +86,7 @@ describe("ScopeKernel", () => {
         }
         return {
           status: "cancelled",
-          usage: { turns: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0 },
+          usage: zeroUsage,
         };
       },
     };

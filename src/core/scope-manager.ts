@@ -69,7 +69,7 @@ export class ScopeManager {
     return this.list().find((scope) => scope.parentId === "root" && scope.status === "active");
   }
 
-  async createChild(id: string, goal: string, timeoutMs: number, scratchPath: string): Promise<ScopeRecord> {
+  async createChild(id: string, goal: string, timeoutMs: number, scratchPath: string, maxTurns = 8): Promise<ScopeRecord> {
     if (this.activeChild()) throw new Error("v0.1 permits only one active child");
     const now = new Date().toISOString();
     const record: ScopeRecord = {
@@ -81,7 +81,7 @@ export class ScopeManager {
       status: "active",
       workspaceMode: "host-shared",
       cwd: this.cwd,
-      budget: { timeoutMs },
+      budget: { timeoutMs, maxTurns },
       runtime: { state: "active", scratchPath },
       traceRef: this.store.traceRef(id),
       createdAt: now,
