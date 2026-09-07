@@ -63,6 +63,8 @@ The [GLM retrieval-usability check](results/2026-09-06-glm-retrieval-usability.m
 
 The [GLM context-mode usability check](results/2026-09-07-glm-context-modes.md) produced two correct synthetic answers with expected fresh/fork selections at $0.00119 combined estimate. The fork caller also restated its background, so this supports interface usability—not an inheritance-benefit or context-saving claim.
 
+The owner-authorized [DeepSeek real-task sandbox-design observation](results/2026-09-07-deepseek-sandbox-design.md) completed after GLM's quota refusal. At $0.01143 combined estimate and 83.0% cached input, the two follow-ups reused evidence without reopening source. However, initial source rereading and material factual errors remain: evidence reuse is not verified correctness. This one-run model exception does not replace the standing GLM preference.
+
 Convert a checkout's diff into the official JSONL shape:
 
 ```sh

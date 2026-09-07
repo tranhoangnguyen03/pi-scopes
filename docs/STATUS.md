@@ -49,9 +49,13 @@ Current API: `scope({ action: "run", context: "fresh" | "fork", goal })`, with f
 
 ## Next priorities
 
-1. **Sandbox design:** define the smallest enforceable boundary suitable for use by others. Keep context choice independent of execution authority. Worktrees and reviewed patch promotion may complement isolation but cannot replace it.
+1. **Sandbox design:** the [boundary proposal](plans/2026-09-07-sandbox-boundary-proposal.md) recommends host inference with all child work routed through containerized Bash, no host-backed file tools, and no automatic promotion. The owner approved Docker as the first backend; implementation begins with an internal command-runner spike, not a public isolation claim. Keep context choice independent of execution authority. Worktrees and reviewed patch promotion cannot replace isolation.
 2. **Release readiness:** consolidated compatibility/security review and installation checks before making a public package recommendation.
 3. **Targeted effectiveness:** only test a remaining claim, such as long-history handoff quality, rather than replay successful demos. Guidance is not an access-control mechanism.
+
+## Post-checkpoint real-task observation
+
+The owner authorized `deepseek/deepseek-v4-flash` for one retry after GLM refused the initial request on quota grounds. The [sandbox-design observation](../evals/results/2026-09-07-deepseek-sandbox-design.md) completed three phases for approximately **$0.01143**, **83.0% cached input**. The first follow-up used retained evidence without reopening source; the second needed no tools. Initial source rereading still occurred, and driver review corrected material mistakes in the conclusions. The child also reported complete after acknowledging uninspected sources at the investigation limit. This demonstrates usable retrieval, not independently verified conclusions, comparative savings or an implemented sandbox. The proposal and report are post-checkpoint work; runtime source remains at the checkpoint.
 
 ## Deliberate limits
 
