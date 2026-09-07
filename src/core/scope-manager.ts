@@ -1,4 +1,4 @@
-import type { ResultCapsule, ScopeRecord, ScopeStatus } from "./types.js";
+import type { ContextMode, ResultCapsule, ScopeRecord, ScopeStatus } from "./types.js";
 import { SCOPE_SCHEMA_VERSION } from "./types.js";
 import type { ScopeStore } from "../storage/scope-store.js";
 
@@ -69,7 +69,7 @@ export class ScopeManager {
     return this.list().find((scope) => scope.parentId === "root" && scope.status === "active");
   }
 
-  async createChild(id: string, goal: string, timeoutMs: number, scratchPath: string, maxTurns = 8): Promise<ScopeRecord> {
+  async createChild(id: string, goal: string, timeoutMs: number, scratchPath: string, maxTurns = 8, context: ContextMode = "fresh"): Promise<ScopeRecord> {
     if (this.activeChild()) throw new Error("v0.1 permits only one active child");
     const now = new Date().toISOString();
     const record: ScopeRecord = {
@@ -78,6 +78,7 @@ export class ScopeManager {
       parentId: "root",
       kind: "subsession",
       goal,
+      context,
       status: "active",
       workspaceMode: "host-shared",
       cwd: this.cwd,

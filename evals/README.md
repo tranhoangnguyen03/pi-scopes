@@ -24,6 +24,8 @@ npm run eval -- smoke-gold \
   --task-repo ../swe-bench-tasks
 ```
 
+Historical runners used the former `scope` action `fork`. Current inference integrations must use `action: "run"` with `context: "fresh"` (default) or `"fork"`, and update any child-limit controls accordingly. Do not modify or silently rerun frozen historical experiments against the new API; record a new runner/source snapshot.
+
 ## Current evaluation policy
 
 Future paid test models: **`zai/glm-5.3-flash` or `zai/glm-5.3`**, per owner preference. Verify availability and pricing before launch; record the exact model and supported thinking settings. Do not silently fall back to Terra/Codex. Historical Terra runs remain unchanged.
@@ -58,6 +60,8 @@ After adding bounded investigation, a [single Django acceptance check](results/2
 The [three-phase follow-up check](results/2026-09-06-followup-context-check.md) resolved the task and answered the final follow-up without tools at $0.700 combined estimate. However, the thin child capsule led to substantial parent re-investigation beforehand; no compaction or comparative context-saving claim is established.
 
 The [GLM retrieval-usability check](results/2026-09-06-glm-retrieval-usability.md) correctly recovered a synthetic recorded result via `scope` at an estimated $0.00051. Navigation worked without repair, but small output pages required four reads; this is a usability observation, not task-resolution evidence.
+
+The [GLM context-mode usability check](results/2026-09-07-glm-context-modes.md) produced two correct synthetic answers with expected fresh/fork selections at $0.00119 combined estimate. The fork caller also restated its background, so this supports interface usability—not an inheritance-benefit or context-saving claim.
 
 Convert a checkout's diff into the official JSONL shape:
 

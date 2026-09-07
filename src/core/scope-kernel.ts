@@ -2,13 +2,17 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { fallbackCapsuleInput } from "./capsule.js";
 import type { ChildExecutor } from "../child/pi-child-executor.js";
-import type { ResultCapsule, ScopeRecord } from "./types.js";
+import type { ContextMode, ResultCapsule, ScopeRecord } from "./types.js";
+import type { ParentSnapshot } from "../child/context.js";
 import { acquireScratch, type ScratchLease } from "../runtime/scratch.js";
 import { ScopeManager } from "./scope-manager.js";
 import type { ScopeStore } from "../storage/scope-store.js";
 
 export interface ForkOptions {
   goal: string;
+  context?: ContextMode;
+  snapshot?: ParentSnapshot;
+  repoInstructions?: boolean;
   timeoutMs?: number;
   maxTurns?: number;
   parent: Pick<ExtensionContext, "model" | "thinkingLevel">;
@@ -37,6 +41,11 @@ export class ScopeKernel {
     if (!goal) throw new Error("A child goal is required");
     if (this.activeAbort) throw new Error("v0.1 permits only one active child");
 
+    const context = options.context ?? "fresh";
+    if (context !== "fresh" && context !== "fork") throw new Error("context must be fresh or fork");
+    if (context === "fork" && !options.snapshot) throw new Error("Fork context requires a parent snapshot");
+    if (context === "fresh" && options.snapshot) throw new Error("Fresh context cannot contain a parent snapshot");
+    if (context === "fork" && options.repoInstructions !== undefined) throw new Error("repoInstructions applies to fresh context only; fork reuses inherited guidance");
     const maxTurns = options.maxTurns ?? 8;
     if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 50) {
       throw new Error("maxTurns must be an integer between 1 and 50");
@@ -56,10 +65,11 @@ export class ScopeKernel {
     try {
       const scratchPath = this.store.scratchPath(scopeId);
       scratch = await acquireScratch(scratchPath);
-      scope = await this.scopes.createChild(scopeId, goal, timeoutMs, scratchPath, maxTurns);
+      scope = await this.scopes.createChild(scopeId, goal, timeoutMs, scratchPath, maxTurns, context);
       await this.store.appendTrace(scope.id, "scope.fork", {
         parentId: scope.parentId,
         goal: scope.goal,
+        context,
         workspaceMode: scope.workspaceMode,
         timeoutMs,
         maxTurns,
@@ -68,6 +78,8 @@ export class ScopeKernel {
       controller.signal.throwIfAborted();
       const execution = await this.childExecutor.run({
         scope,
+        ...(options.snapshot ? { snapshot: options.snapshot } : {}),
+        ...(options.repoInstructions !== undefined ? { repoInstructions: options.repoInstructions } : {}),
         parent: options.parent,
         signal: controller.signal,
         ...(options.onActivity ? { onActivity: (label) => options.onActivity?.(scope as ScopeRecord, label) } : {}),
@@ -77,6 +89,7 @@ export class ScopeKernel {
       const capsule: ResultCapsule = {
         ...capsuleInput,
         status: execution.status,
+        context,
         scopeId: scope.id,
         traceRef,
         usage: execution.usage,
@@ -97,6 +110,7 @@ export class ScopeKernel {
       const capsule: ResultCapsule = {
         ...fallbackCapsuleInput(undefined, message),
         status,
+        context,
         scopeId: scope.id,
         traceRef: this.store.traceRef(scope.id),
         fallbackReason: message,

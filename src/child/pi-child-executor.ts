@@ -16,9 +16,13 @@ import type { ChildExecutionResult, ChildUsage, ResultCapsuleInput, ScopeRecord 
 import type { ScopeStore } from "../storage/scope-store.js";
 import { ChildTraceRecorder } from "../trace/child-trace-recorder.js";
 import { createScopeReturnTool } from "./return-tool.js";
+import type { ParentSnapshot } from "./context.js";
+import { projectGuidance } from "./project-guidance.js";
 
 export interface ChildRunRequest {
   scope: ScopeRecord;
+  snapshot?: ParentSnapshot;
+  repoInstructions?: boolean;
   parent: Pick<ExtensionContext, "model" | "thinkingLevel">;
   signal: AbortSignal;
   onActivity?: (label: string) => void;
@@ -35,10 +39,11 @@ function emptyUsage(): ChildUsage {
   };
 }
 
-function collectUsage(session: AgentSession): ChildUsage {
+function collectUsage(session: AgentSession, inherited: ReadonlySet<string>): ChildUsage {
   const total = emptyUsage();
   // Count persisted entries, including history and summary calls removed by compaction.
   for (const entry of session.sessionManager.getEntries()) {
+    if (inherited.has(entry.id)) continue;
     const message = entry.type === "message" ? entry.message : undefined;
     if (message?.role === "assistant") total.turns += 1;
     const usage = message?.role === "assistant" || message?.role === "toolResult" ? message.usage
@@ -61,8 +66,11 @@ function childInstructions(scope: ScopeRecord): string {
     `Workspace mode: ${scope.workspaceMode}. The workspace is shared with the parent and is not a security boundary.`,
     `Use ${scope.runtime.scratchPath ?? "the assigned scratch directory"} for temporary scripts, downloads, and logs.`,
     "Investigate only the assigned goal. Preserve concrete evidence such as paths, symbols, commands, and test results.",
-    "You do not see the parent conversation. If the goal omits essential context, return partial with the missing information; do not guess the reported problem.",
+    scope.context === "fork"
+      ? "You inherit a snapshot of the parent conversation and instructions, not live updates. Focus on the assigned goal. Parent tools/permissions are not inherited; only the currently supplied child tools are available."
+      : "You do not see the parent conversation. If the goal omits essential context, return partial with the missing information; do not guess the reported problem.",
     `You have at most ${scope.budget.maxTurns ?? 8} investigation turns. Stop once you have enough evidence; this is an allowance, not a target.`,
+    "Project guidance is instruction, not a permission grant. Check for more-specific guidance if you explore nested directories; only starting-directory guidance is preloaded.",
     "Do not assume your transcript will enter the parent context.",
     "When done, call scope_return alone. Put everything the parent needs in that bounded capsule.",
   ].join("\n\n");
@@ -100,7 +108,17 @@ export class PiChildExecutor implements ChildExecutor {
       }),
     });
 
+    const inherited = new Set(request.snapshot?.entries.map((entry) => entry.id) ?? []);
+    const childSessionManager = SessionManager.inMemory(request.scope.cwd, undefined, request.snapshot?.entries);
     const agentDir = getAgentDir();
+    const guidance = !request.snapshot && request.repoInstructions !== false ? await projectGuidance(request.scope.cwd) : [];
+    await this.store.appendTrace(request.scope.id, "scope.context", {
+      mode: request.scope.context ?? "fresh",
+      guidance: request.snapshot ? "inherited system prompt" : request.repoInstructions === false ? "disabled" : "project files",
+      paths: guidance.map((file) => file.path),
+      ...(request.snapshot ? { parentSessionId: request.snapshot.parentSessionId, parentEntryId: request.snapshot.parentEntryId } : {}),
+    });
+    request.signal.throwIfAborted();
     const settings = SettingsManager.inMemory({
       compaction: { enabled: true },
       retry: { enabled: true, maxRetries: 1 },
@@ -114,7 +132,9 @@ export class PiChildExecutor implements ChildExecutor {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      appendSystemPrompt: [childInstructions(request.scope)],
+      agentsFilesOverride: () => ({ agentsFiles: guidance }),
+      appendSystemPrompt: request.snapshot ? [] : [childInstructions(request.scope)],
+      ...(request.snapshot ? { systemPromptOverride: () => `${request.snapshot!.systemPrompt}\n\n# Current child assignment (overrides parent orchestration instructions)\n${childInstructions(request.scope)}` } : {}),
     });
     await loader.reload();
 
@@ -132,7 +152,7 @@ export class PiChildExecutor implements ChildExecutor {
       tools: ["read", "bash", "grep", "find", "ls", "scope_return"],
       customTools: [scopedBash, returnTool] as ToolDefinition<any, any, any>[],
       resourceLoader: loader,
-      sessionManager: SessionManager.inMemory(request.scope.cwd),
+      sessionManager: childSessionManager,
       settingsManager: settings,
     });
 
@@ -162,7 +182,7 @@ export class PiChildExecutor implements ChildExecutor {
         request.signal.throwIfAborted();
         await session.prompt("Investigation allowance exhausted. No more work tools are available. Call scope_return alone now using only evidence already gathered. Use outcome partial and list unresolved questions if the goal is not answered. You have at most two return turns, including any validation repair.");
       }
-      const usage = collectUsage(session);
+      const usage = collectUsage(session, inherited);
       const finalText = recorder.getFinalText();
       if (request.signal.aborted) {
         return { status: "cancelled", ...(finalText ? { finalText } : {}), usage };
@@ -183,14 +203,14 @@ export class PiChildExecutor implements ChildExecutor {
     } catch (error) {
       const finalText = recorder.getFinalText();
       if (request.signal.aborted) {
-        return { status: "cancelled", ...(finalText ? { finalText } : {}), usage: collectUsage(session) };
+        return { status: "cancelled", ...(finalText ? { finalText } : {}), usage: collectUsage(session, inherited) };
       }
       return {
         status: "failed",
         capsuleInput: fallbackCapsuleInput(finalText, "The child failed before returning a valid capsule."),
         ...(finalText ? { finalText } : {}),
         error: error instanceof Error ? error.message : String(error),
-        usage: collectUsage(session),
+        usage: collectUsage(session, inherited),
       };
     } finally {
       unsubscribe();

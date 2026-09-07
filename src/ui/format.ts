@@ -11,7 +11,7 @@ export function formatScopeTree(scopes: readonly ScopeRecord[], page = 1): strin
   for (const child of children.slice((page - 1) * 10, page * 10)) {
     const marker = child.status === "active" ? "↳" : child.status === "completed" ? "✓" : child.status === "cancelled" ? "×" : "!";
     const goal = Array.from(child.goal.replace(/\s+/g, " "));
-    lines.push(`${marker} ${child.id}  ${child.status}  ${goal.slice(0, 100).join("")}${goal.length > 100 ? "…" : ""}`);
+    lines.push(`${marker} ${child.id}  ${child.status}${child.context ? ` [${child.context}]` : ""}  ${goal.slice(0, 100).join("")}${goal.length > 100 ? "…" : ""}`);
     lines.push(`  Evidence: scope(${JSON.stringify({ action: "inspect", scopeId: child.id })})`);
   }
   if (children.length === 0) lines.push("  No child scopes.");
@@ -24,6 +24,7 @@ export function formatScope(scope: ScopeRecord): string {
     `${scope.id} · ${scope.status}`,
     `goal: ${scope.goal}`,
     `kind: ${scope.kind}`,
+    ...(scope.context ? [`context: ${scope.context}`] : []),
     `workspace: ${scope.workspaceMode}`,
     `runtime: ${scope.runtime.state}`,
     `timeout: ${scope.budget.timeoutMs === 0 ? "none" : `${Math.round(scope.budget.timeoutMs / 1000)}s`}`,
@@ -35,7 +36,7 @@ export function formatScope(scope: ScopeRecord): string {
 
 export function formatCapsule(capsule: ResultCapsule): string {
   const lines = [
-    `${capsule.scopeId} · ${capsule.status}`,
+    `${capsule.scopeId} · ${capsule.status}${capsule.context ? ` · ${capsule.context} context` : ""}`,
     capsule.summary,
   ];
   if (capsule.conclusions?.length) lines.push(`Conclusions:\n${capsule.conclusions.map((item) => `- ${item}`).join("\n")}`);

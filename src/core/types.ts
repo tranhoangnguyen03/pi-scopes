@@ -3,6 +3,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 export const SCOPE_SCHEMA_VERSION = 1 as const;
 
 export type ScopeId = string;
+export type ContextMode = "fresh" | "fork";
 export type ScopeStatus = "active" | "completed" | "partial" | "failed" | "cancelled";
 export type RuntimeState = "active" | "disposed";
 
@@ -17,6 +18,7 @@ export interface ScopeRecord {
   parentId: ScopeId | null;
   kind: "root" | "subsession";
   goal: string;
+  context?: ContextMode;
   status: ScopeStatus;
   workspaceMode: "host-shared";
   cwd: string;
@@ -55,6 +57,7 @@ export interface ResultCapsuleInput {
 export interface ResultCapsule extends ResultCapsuleInput {
   status: Exclude<ScopeStatus, "active">;
   scopeId: ScopeId;
+  context?: ContextMode;
   traceRef: string;
   fallbackReason?: string;
   error?: string;

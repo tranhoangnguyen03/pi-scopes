@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -28,6 +28,7 @@ let requests: RequestBody[];
 let requested: Promise<void>;
 let onRequested: () => void;
 let parentSession: AgentSession | undefined;
+let contextMode: "fresh" | "fork" | undefined;
 
 const findings = {
   summary: "Located the evidence", evidence: [{ summary: "fixture evidence", source: "evidence.txt:1" }],
@@ -39,6 +40,7 @@ beforeEach(async () => {
   vi.stubEnv("PI_CODING_AGENT_DIR", directory);
   vi.stubEnv("PI_OFFLINE", "1");
   mode = "return";
+  contextMode = undefined;
   requests = [];
   requested = new Promise<void>((resolve) => { onRequested = resolve; });
   returnRequested = new Promise<void>((resolve) => { onReturnRequested = resolve; });
@@ -61,7 +63,7 @@ beforeEach(async () => {
     const name = child ? (investigate ? "read" : hasResult ? "scope_return" : "read") : "scope";
     let args: Record<string, unknown> = child
       ? (name === "scope_return" ? { outcome: mode === "partial-return" || returnOnly ? "partial" : "complete", ...findings } : { path: "evidence.txt" })
-      : { action: "fork", goal: "Investigate evidence.txt", timeoutSeconds: 5 };
+      : { action: "run", ...(contextMode ? { context: contextMode } : {}), goal: "Investigate evidence.txt", timeoutSeconds: 5 };
     if (returnOnly && mode === "repair-return" && requests.filter((request) => request.tools.length === 1).length === 1) {
       Object.assign(args, { summary: "" });
     }
@@ -109,9 +111,9 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-async function createKernel(): Promise<ScopeKernel> {
+async function createKernel(cwd = directory): Promise<ScopeKernel> {
   const store = new ScopeStore(path.join(directory, "scope-data"), "integration");
-  const kernel = new ScopeKernel(store, new PiChildExecutor(store), directory);
+  const kernel = new ScopeKernel(store, new PiChildExecutor(store), cwd);
   await kernel.initialize();
   return kernel;
 }
@@ -123,21 +125,37 @@ function parent() {
 }
 
 describe("real Pi integration with a local scripted provider", () => {
-  it("delivers evidence to the parent and includes child inference in session totals", async () => {
+  it.each(["fresh", "fork"] as const)("delivers evidence without transcript pollution or double-counting with %s context", async (context) => {
+    contextMode = context;
+    const history = SessionManager.inMemory(directory);
+    history.appendMessage({ role: "user", content: "EARLIER_PARENT_BACKGROUND", timestamp: 1 });
+    history.appendMessage({ role: "assistant", content: [{ type: "text", text: "Earlier answer" }], api: "openai-completions", provider: "fixture", model: "fixture", timestamp: 2, stopReason: "stop",
+      usage: { input: 1000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1000, cost: { input: 0.001, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 } } });
+    history.appendCompaction("Earlier discussion summary", history.getBranch()[0]!.id, 1000, undefined, false,
+      { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { input: 0.0001, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.0001 } });
+    await writeFile(path.join(directory, "evidence.txt"), "fixture evidence\nCHILD_ONLY_RAW_DETAIL\n");
+    await writeFile(path.join(directory, "AGENTS.md"), "FRESH_PROJECT_RULES");
     const settingsManager = SettingsManager.inMemory();
     const loader = new DefaultResourceLoader({
+      appendSystemPrompt: ["PARENT_EFFECTIVE_RULES"],
       cwd: directory, agentDir: directory, settingsManager, noExtensions: true, noSkills: true,
       noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: [piScopes],
     });
     await loader.reload();
     ({ session: parentSession } = await createAgentSession({
       cwd: directory, agentDir: directory, ...parent(), modelRuntime: runtime,
-      tools: ["scope"], resourceLoader: loader, settingsManager, sessionManager: SessionManager.inMemory(directory),
+      tools: ["scope"], resourceLoader: loader, settingsManager, sessionManager: history,
     }));
     await parentSession.prompt("PARENT_ONLY_CONTEXT: delegate the evidence investigation.");
     expect(requests).toHaveLength(4); // parent → child read → child return → parent
     const childRequests = requests.filter((request) => request.tools.some((tool) => tool.function.name === "scope_return"));
-    expect(JSON.stringify(childRequests)).not.toContain("PARENT_ONLY_CONTEXT");
+    expect(JSON.stringify(childRequests).includes("PARENT_ONLY_CONTEXT")).toBe(context === "fork");
+    expect(JSON.stringify(childRequests).includes("EARLIER_PARENT_BACKGROUND")).toBe(context === "fork");
+    expect(JSON.stringify(childRequests).includes("FRESH_PROJECT_RULES")).toBe(context === "fresh");
+    expect(JSON.stringify(childRequests[0]?.messages).match(/PARENT_EFFECTIVE_RULES/g)?.length ?? 0).toBe(context === "fork" ? 1 : 0);
+    expect(JSON.stringify(childRequests[0]?.messages).match(/You are a focused child session/g)?.length).toBe(1);
+    expect(JSON.stringify(requests.at(-1)?.messages)).not.toContain("CHILD_ONLY_RAW_DETAIL");
+    expect(JSON.stringify(childRequests[0]?.messages.filter((message) => message.role === "assistant"))).not.toContain('"name":"scope"');
     expect(childRequests[0]?.tools.map((tool) => tool.function.name).sort()).toEqual(
       ["read", "bash", "grep", "find", "ls", "scope_return"].sort(),
     );
@@ -146,12 +164,12 @@ describe("real Pi integration with a local scripted provider", () => {
       expect(returned).toContain(text);
     }
     const stats = parentSession.getSessionStats();
-    expect(stats.tokens).toMatchObject({ input: 40, output: 16, total: 56 });
-    expect(stats.cost).toBeCloseTo(0.000072, 10);
+    expect(stats.tokens).toMatchObject({ input: 1140, output: 16, total: 1156 });
+    expect(stats.cost).toBeCloseTo(0.001172, 10);
     const store = new ScopeStore(path.join(directory, "scope-data"), parentSession.sessionId);
     const scope = (await store.listScopes()).find((record) => record.kind === "subsession");
-    expect(scope).toMatchObject({ status: "completed", runtime: { state: "disposed" } });
-    expect(await store.readResult(scope!.id)).toMatchObject(findings);
+    expect(scope).toMatchObject({ status: "completed", context, runtime: { state: "disposed" } });
+    expect(await store.readResult(scope!.id)).toMatchObject({ ...findings, context, usage: { input: 20, output: 8, totalTokens: 28 } });
     await expect(access(store.scratchPath(scope!.id))).rejects.toMatchObject({ code: "ENOENT" });
     expect((await store.readTrace(scope!.id)).some((event) => event.type === "pi.tool_execution_end")).toBe(true);
   });
@@ -183,6 +201,8 @@ describe("real Pi integration with a local scripted provider", () => {
     await expect(tool.execute("missing-scope", { action: "read" }, undefined, undefined, ctx)).rejects.toThrow('scope({"action":"inspect"})');
     await expect(tool.execute("missing-item", { action: "read", scopeId: "sc_1234567890" }, undefined, undefined, ctx)).rejects.toThrow("read requires item");
     await expect(tool.execute("wrong-action", { action: "inspect", scopeId: "sc_1234567890", item: 1 }, undefined, undefined, ctx)).rejects.toThrow("Use action read");
+    await expect(tool.execute("old-action", { action: "fork", goal: "Investigate" }, undefined, undefined, ctx)).rejects.toThrow("Use run, inspect, or read");
+    await expect(tool.execute("bad-context", { action: "run", context: "invalid", goal: "Investigate" }, undefined, undefined, ctx)).rejects.toThrow("context must be fresh or fork");
     expect(requests).toHaveLength(0);
   });
 
@@ -212,6 +232,30 @@ describe("real Pi integration with a local scripted provider", () => {
     expect(children).toHaveLength(1);
     const trace = await store.readTrace(children[0]!.id);
     expect(trace.filter((event) => event.type === "pi.tool_execution_start")).toHaveLength(2); // original read + return only
+  });
+
+  it.each([true, false])("fresh project guidance respects repoInstructions=%s without loading global files", async (repoInstructions) => {
+    const cwd = path.join(directory, "workspace");
+    await mkdir(cwd);
+    await writeFile(path.join(directory, "AGENTS.md"), "GLOBAL_RULES_EXCLUDED");
+    await writeFile(path.join(cwd, "AGENTS.md"), "PROJECT_RULES_INCLUDED");
+    await writeFile(path.join(cwd, "evidence.txt"), "fixture evidence");
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Investigate", repoInstructions, parent: parent() });
+    expect(capsule.context).toBe("fresh");
+    expect(JSON.stringify(requests).includes("PROJECT_RULES_INCLUDED")).toBe(repoInstructions);
+    expect(JSON.stringify(requests)).not.toContain("GLOBAL_RULES_EXCLUDED");
+    const entry = (await kernel.store.readTrace(capsule.scopeId)).find((event) => event.type === "scope.context");
+    expect(entry?.data).toMatchObject({ mode: "fresh", guidance: repoInstructions ? "project files" : "disabled" });
+  });
+
+  it("reports oversized project guidance before any child inference", async () => {
+    await writeFile(path.join(directory, "AGENTS.md"), "x".repeat(32_001));
+    const kernel = await createKernel();
+    const capsule = await kernel.fork({ goal: "Investigate", parent: parent() });
+    expect(capsule.status).toBe("failed");
+    expect(capsule.error).toContain("32,000");
+    expect(requests).toHaveLength(0);
   });
 
   it.each(["parent", "timeout"] as const)("cancels a streaming child on %s abort", async (source) => {
@@ -245,10 +289,12 @@ describe("real Pi integration with a local scripted provider", () => {
     expect(capsule.fallbackReason).toContain("without calling scope_return");
   });
 
-  it("limits investigation then returns a partial capsule with all usage", async () => {
+  it.each(["fresh", "fork"] as const)("limits %s investigation then returns a partial capsule with all usage", async (context) => {
     mode = "budget";
     const kernel = await createKernel();
-    const capsule = await kernel.fork({ goal: "Investigate evidence.txt", maxTurns: 2, parent: parent(), timeoutMs: 500 });
+    const capsule = await kernel.fork({ goal: "Investigate evidence.txt", context,
+      ...(context === "fork" ? { snapshot: { entries: [], systemPrompt: "Inherited rules", parentSessionId: "test", parentEntryId: null } } : {}),
+      maxTurns: 2, parent: parent(), timeoutMs: 500 });
     expect(capsule).toMatchObject({ status: "partial", ...findings });
     expect(requests).toHaveLength(3);
     expect(requests[2]?.tools.map((tool) => tool.function.name)).toEqual(["scope_return"]);
