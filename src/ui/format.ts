@@ -26,6 +26,8 @@ export function formatScope(scope: ScopeRecord): string {
     `kind: ${scope.kind}`,
     ...(scope.context ? [`context: ${scope.context}`] : []),
     `workspace: ${scope.workspaceMode}`,
+    ...(scope.runtime.containerName ? [`container: ${scope.runtime.containerName}`] : []),
+    ...(scope.runtime.sourceRevision ? [`source revision: ${scope.runtime.sourceRevision}`] : []),
     `runtime: ${scope.runtime.state}`,
     `timeout: ${scope.budget.timeoutMs === 0 ? "none" : `${Math.round(scope.budget.timeoutMs / 1000)}s`}`,
     `trace: ${scope.traceRef}`,
@@ -36,7 +38,8 @@ export function formatScope(scope: ScopeRecord): string {
 
 export function formatCapsule(capsule: ResultCapsule): string {
   const lines = [
-    `${capsule.scopeId} · ${capsule.status}${capsule.context ? ` · ${capsule.context} context` : ""}`,
+    `${capsule.scopeId} · ${capsule.status}${capsule.context ? ` · ${capsule.context} context` : ""}${capsule.workspaceMode ? ` · ${capsule.workspaceMode}` : ""}`,
+    ...(capsule.sourceRevision ? [`Project copy: ${capsule.sourceRevision}; guest files are not promoted or retained.`] : []),
     capsule.summary,
   ];
   if (capsule.conclusions?.length) lines.push(`Conclusions:\n${capsule.conclusions.map((item) => `- ${item}`).join("\n")}`);

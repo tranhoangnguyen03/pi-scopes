@@ -141,6 +141,12 @@ export class ScopeStore {
     return `blob://${this.sessionId}/${name}`;
   }
 
+  async saveEvidenceBlob(scopeId: string, contents: Buffer): Promise<string> {
+    const name = `${safeSegment(scopeId)}-${randomUUID()}.log`;
+    await writeFile(path.join(this.sessionDir, "blobs", name), contents, { flag: "wx", mode: 0o600 });
+    return `blob://${this.sessionId}/${name}`;
+  }
+
   async readEvidenceBlob(scopeId: string, ref: string): Promise<string | undefined> {
     const prefix = `blob://${this.sessionId}/`;
     if (!ref.startsWith(prefix)) return undefined;

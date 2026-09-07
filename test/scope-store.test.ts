@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DockerRuntime } from "../src/runtime/docker.js";
 import { ScopeStore } from "../src/storage/scope-store.js";
 import { ScopeManager } from "../src/core/scope-manager.js";
 import { SCOPE_SCHEMA_VERSION, type ScopeRecord } from "../src/core/types.js";
@@ -9,6 +10,7 @@ import { SCOPE_SCHEMA_VERSION, type ScopeRecord } from "../src/core/types.js";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -44,6 +46,22 @@ describe("ScopeStore", () => {
     expect(events[1]?.data).toBeNull();
     expect(events[2]?.data).toMatchObject({ name: "Error", message: "safe" });
     expect((await readFile(reopened.tracePath("sc_one"), "utf8")).trim().split("\n")).toHaveLength(3);
+  });
+
+  it.each([true, false])("reconciles recorded Docker runtimes without claiming unverified cleanup: success=%s", async (success) => {
+    const { store } = await temporaryStore("docker-recovery");
+    const manager = new ScopeManager(store, process.cwd());
+    await manager.initialize();
+    const scope = await manager.createChild("sc_recover", "unfinished", 1000, store.scratchPath("sc_recover"), 8, "fresh", "docker-copy");
+    scope.runtime.containerName = "pi-scopes-00000000-0000-0000-0000-000000000000";
+    await store.saveScope(scope);
+    const recovery = vi.spyOn(DockerRuntime, "recover");
+    if (success) recovery.mockResolvedValue();
+    else recovery.mockRejectedValue(new Error("Docker unavailable"));
+    const reopened = new ScopeManager(store, process.cwd());
+    await reopened.initialize();
+    expect(recovery).toHaveBeenCalledWith(scope.runtime.containerName);
+    expect(reopened.get(scope.id)).toMatchObject({ status: "failed", runtime: { state: success ? "disposed" : "cleanup-failed" } });
   });
 
   it("finalizes orphaned active children instead of resuming them", async () => {

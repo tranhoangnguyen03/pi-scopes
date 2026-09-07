@@ -1,33 +1,42 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { promisify } from "node:util";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 
 const execFileAsync = promisify(execFile);
 const OUTPUT_BYTES = 1024 * 1024;
 
-async function docker(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("docker", args, { timeout: 15_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024 });
-  return stdout.trim();
+async function docker(args: string[], input?: Buffer, signal?: AbortSignal): Promise<string> {
+  const pending = execFileAsync("docker", args, { timeout: 15_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024, ...(signal ? { signal } : {}) });
+  pending.child.stdin?.on("error", () => {});
+  pending.child.stdin?.end(input);
+  return (await pending).stdout.trim();
 }
 
-/** Internal fixture runner, not a selectable scope mode or a complete sandbox integration. */
+/** Command execution boundary; host policy owns image, import and lifecycle. */
 export class DockerRuntime implements BashOperations {
-  readonly name = `pi-scopes-${randomUUID()}`;
+  readonly name: string;
   private disposal: Promise<void> | undefined;
   private closed = false;
   private running = false;
   private stopClient: (() => void) | undefined;
 
-  private constructor() {}
+  private constructor(name = `pi-scopes-${randomUUID()}`) {
+    if (!/^pi-scopes-[0-9a-f-]{36}$/.test(name)) throw new Error("Invalid owned Docker runtime identity");
+    this.name = name;
+  }
 
-  static async create(image: string): Promise<DockerRuntime> {
+  static async create(image: string, onAllocated?: (name: string) => Promise<void>, signal?: AbortSignal): Promise<DockerRuntime> {
+    signal?.throwIfAborted();
     if (!/^sha256:[a-f0-9]{64}$/.test(image)) throw new Error("Docker image must be a complete local sha256: image ID; no pull or mutable tags.");
     // Image-declared VOLUMEs would create writable mounts outside the bounded tmpfs policy.
     const volumes: unknown = JSON.parse(await docker(["image", "inspect", "--format", "{{json .Config.Volumes}}", image]));
     if (volumes && Object.keys(volumes).length) throw new Error("Docker image declares volumes; use an image without VOLUME instructions.");
     const runtime = new DockerRuntime();
+    await onAllocated?.(runtime.name); // Persist ownership before Docker can create anything.
     try {
+      signal?.throwIfAborted();
       await docker([
         "create", "--pull=never", "--name", runtime.name, "--label", "pi-scopes.runtime=experimental",
         "--network=none", "--ipc=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
@@ -37,7 +46,9 @@ export class DockerRuntime implements BashOperations {
         "--no-healthcheck", "--log-driver=none", "--init", "--entrypoint=/bin/sh", image,
         "-c", "while :; do sleep 3600; done",
       ]);
+      signal?.throwIfAborted();
       await docker(["start", runtime.name]);
+      signal?.throwIfAborted();
       return runtime;
     } catch (error) {
       try { await runtime.dispose(); }
@@ -46,10 +57,41 @@ export class DockerRuntime implements BashOperations {
     }
   }
 
+  static async recover(name: string): Promise<void> {
+    const runtime = new DockerRuntime(name);
+    if (!await docker(["ps", "-aq", "--filter", `name=^/${name}$`])) return;
+    let label: string;
+    try { label = await docker(["inspect", "--format", '{{index .Config.Labels "pi-scopes.runtime"}}', name]); }
+    catch (error) {
+      if (!await docker(["ps", "-aq", "--filter", `name=^/${name}$`])) return;
+      throw error;
+    }
+    if (label !== "experimental") throw new Error(`Refusing cleanup of unlabelled Docker runtime: ${name}`);
+    await runtime.dispose();
+  }
+
+  async importDirectory(directory: string, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (this.closed || this.running) throw new Error("Docker import requires an idle open runtime");
+    this.running = true;
+    try {
+      // Docker cp refuses read-only rootfs, including tmpfs targets. Stream an owned regular-file
+      // snapshot to the unprivileged guest instead; never weaken rootfs or add CHOWN capability.
+      const archive = await execFileAsync("tar", ["-cf", "-", "-C", directory, "."], {
+        encoding: "buffer", maxBuffer: 16 * 1024 * 1024, timeout: 15_000, killSignal: "SIGKILL", ...(signal ? { signal } : {}),
+        env: { ...process.env, TAR_OPTIONS: "", COPYFILE_DISABLE: "1" },
+      });
+      signal?.throwIfAborted();
+      if (this.closed) throw new Error(`Docker runtime disposed during import: ${this.name}`);
+      await docker(["exec", "-i", "--workdir=/workspace", this.name, "tar", "-xf", "-", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir"], archive.stdout, signal);
+      signal?.throwIfAborted();
+    } finally { this.running = false; }
+  }
+
   async exec(command: string, cwd: string, options: Parameters<BashOperations["exec"]>[2]): Promise<{ exitCode: number | null }> {
     if (this.closed) throw new Error(`Docker runtime disposed or cleanup pending: ${this.name}`);
     if (this.running) throw new Error("One command at a time per Docker runtime");
-    if (cwd !== "/workspace") throw new Error("Docker runner cwd must be /workspace; host paths are not mapped.");
+    if (cwd !== "/workspace" && (!cwd.startsWith("/workspace/") || path.posix.normalize(cwd) !== cwd)) throw new Error("Docker runner cwd must be under /workspace; host paths are not mapped.");
     const seconds = options.timeout ?? 300;
     if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 300) throw new Error("Docker command timeout must be > 0 and <= 300 seconds");
     if (options.signal?.aborted) {
@@ -60,7 +102,7 @@ export class DockerRuntime implements BashOperations {
     }
 
     // Never forward options.env: SDK shell env includes host variables. No host shell is used.
-    const child = spawn("docker", ["exec", "--workdir=/workspace", this.name, "/bin/bash", "--noprofile", "--norc", "-c", command], {
+    const child = spawn("docker", ["exec", `--workdir=${cwd}`, this.name, "/bin/bash", "--noprofile", "--norc", "-c", command], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     // spawn can reject invalid arguments synchronously; do not leave the runtime busy.

@@ -40,6 +40,12 @@ export class ScopeKernel {
     const goal = options.goal.trim();
     if (!goal) throw new Error("A child goal is required");
     if (this.activeAbort) throw new Error("v0.1 permits only one active child");
+    if (this.scopes.list().some((scope) => scope.runtime.state === "cleanup-failed")) throw new Error("Docker cleanup is unverified. Restore Docker and reload this session to reconcile before launching more work.");
+    const execution = process.env.PI_SCOPES_EXECUTION ?? "host";
+    if (execution !== "host" && execution !== "docker") throw new Error("PI_SCOPES_EXECUTION must be host or docker; no fallback was used.");
+    const image = execution === "docker" ? process.env.PI_SCOPES_DOCKER_IMAGE : undefined;
+    if (execution === "docker" && (!image || !/^sha256:[a-f0-9]{64}$/.test(image))) throw new Error("Docker mode requires PI_SCOPES_DOCKER_IMAGE set to a complete local sha256: image ID; no mutable tags or automatic pulls.");
+    const workspaceMode = execution === "docker" ? "docker-copy" : "host-shared";
 
     const context = options.context ?? "fresh";
     if (context !== "fresh" && context !== "fork") throw new Error("context must be fresh or fork");
@@ -65,7 +71,7 @@ export class ScopeKernel {
     try {
       const scratchPath = this.store.scratchPath(scopeId);
       scratch = await acquireScratch(scratchPath);
-      scope = await this.scopes.createChild(scopeId, goal, timeoutMs, scratchPath, maxTurns, context);
+      scope = await this.scopes.createChild(scopeId, goal, timeoutMs, scratchPath, maxTurns, context, workspaceMode, image);
       await this.store.appendTrace(scope.id, "scope.fork", {
         parentId: scope.parentId,
         goal: scope.goal,
@@ -90,7 +96,9 @@ export class ScopeKernel {
         ...capsuleInput,
         status: execution.status,
         context,
+        workspaceMode,
         scopeId: scope.id,
+        ...(scope.runtime.sourceRevision ? { sourceRevision: scope.runtime.sourceRevision } : {}),
         traceRef,
         usage: execution.usage,
         ...(execution.fallbackReason ? { fallbackReason: execution.fallbackReason }
@@ -105,13 +113,15 @@ export class ScopeKernel {
       return capsule;
     } catch (error) {
       if (!scope) throw error;
-      const status = controller.signal.aborted ? "cancelled" : "failed";
+      const status = controller.signal.aborted && scope.runtime.state !== "cleanup-failed" ? "cancelled" : "failed";
       const message = error instanceof Error ? error.message : String(error);
       const capsule: ResultCapsule = {
         ...fallbackCapsuleInput(undefined, message),
         status,
         context,
+        workspaceMode,
         scopeId: scope.id,
+        ...(scope.runtime.sourceRevision ? { sourceRevision: scope.runtime.sourceRevision } : {}),
         traceRef: this.store.traceRef(scope.id),
         fallbackReason: message,
         error: message,
@@ -125,7 +135,7 @@ export class ScopeKernel {
       options.signal?.removeEventListener("abort", parentAbort);
       if (this.activeAbort === controller) this.activeAbort = undefined;
       if (scratch) await scratch.dispose();
-      if (scope) {
+      if (scope && scope.runtime.state !== "cleanup-failed") {
         await this.store.appendTrace(scope.id, "runtime.disposed", {});
         await this.scopes.disposeRuntime(scope.id);
       }

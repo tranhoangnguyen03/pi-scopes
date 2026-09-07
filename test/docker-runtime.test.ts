@@ -179,6 +179,36 @@ describe.skipIf(!image)("real Docker boundary (explicit local image required)", 
     await runtime.dispose();
   }, 90_000);
 
+  it("cancels host archive creation during import without waiting for its control deadline", async () => {
+    const runtime = await start();
+    const directory = await mkdtemp(path.join(os.tmpdir(), "scope-import-cancel-"));
+    const marker = path.join(directory, "started");
+    await writeFile(path.join(directory, "tar"), `#!/bin/sh\nprintf started > '${marker}'\nexec /bin/sleep 30\n`, { mode: 0o700 });
+    const originalPath = process.env.PATH;
+    const controller = new AbortController();
+    process.env.PATH = `${directory}${path.delimiter}${originalPath ?? ""}`;
+    const task = runtime.importDirectory(directory, controller.signal);
+    const stopped = expect(task).rejects.toThrow();
+    try {
+      let started = false;
+      for (let attempt = 0; attempt < 300 && !started; attempt++) {
+        started = await readFile(marker).then(() => true, () => false);
+        if (!started) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(started).toBe(true);
+      const at = Date.now();
+      controller.abort();
+      await stopped;
+      expect(Date.now() - at).toBeLessThan(2000);
+    } finally {
+      controller.abort();
+      await stopped;
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 90_000);
+
   it("honors an already-aborted signal without running a command", async () => {
     const runtime = await start();
     await expect(runtime.exec("echo forbidden", "/workspace", { signal: AbortSignal.abort(), onData() { throw new Error("must not run"); } })).rejects.toThrow(/aborted/);

@@ -1,74 +1,56 @@
 # Experimental checkpoint — 2026-09-07
 
-**Milestone: fresh/fork context modes + bounded investigation + retained evidence retrieval.** This is a tested research prototype, not a sandbox or a broadly validated production release. Package version remains `0.1.0-experimental.0` (private); no publication is implied.
+**Milestone: usable opt-in Docker delegation, with fresh/fork context and retained evidence.** Package remains private `0.1.0-experimental.0`; this is not a registry release or security certification.
 
-## Working behavior
+## What works now
 
-- Pi 0.85.1; parent/child communication stays in-process. No socket-server or intercom dependency.
-- One foreground same-model child in a shared host workspace, with fresh delegation (default) or forked parent context.
-- Self-contained handoff guidance; default eight investigation turns, then at most two return-only turns. Explicit partial findings, cancellation, trace retention, scratch cleanup and combined usage accounting.
-- Bounded result capsules with provenance and evidence-inspection hints.
-- Existing `scope` tool lists scopes, inspects numbered tool records, and reads retained output. No command replay or model invocation for retrieval. Missing or ambiguous evidence is not invented.
-- Evidence output pages now use up to 6,000 UTF-8 bytes while keeping whole code points and the full response within 8 KiB. This replaces the small character pages used in the initial GLM check; no paid effectiveness improvement is claimed for that refinement.
+- One foreground, same-model child; Pi 0.85.1 in-process sessions/callbacks, no socket/intercom service.
+- `scope({action:"run", context:"fresh"|"fork", goal})`. Fresh defaults to applicable project guidance; fork inherits the active conversation snapshot/effective instructions, not parent tools or permission hooks.
+- **Host execution remains the default and is unrestricted.** Owner environment can select **Docker-copy execution**; the model cannot choose host fallback.
+- Docker receives a clean committed project copy under `/workspace`, not a mount of the parent checkout. All child file/command work uses isolated Bash; host-backed file tools are absent. Both fresh and fork are tested through the real SDK.
+- Child edits affect only the copy. No network or automatic promotion. Needed findings/diffs survive as captured command output and capsules; guest file paths alone are not durable artifacts.
+- Default eight investigation turns, up to two return-only turns, explicit partial outcomes, cancellation and combined parent/child usage accounting.
+- Parent can inspect/read bounded retained evidence after container and scratch cleanup. Owned Docker output blobs preserve raw capture plus exit/failure metadata without SDK host temporary files.
+- Container identity is persisted before creation. Verified cleanup precedes normal return. Cleanup failure is visible, blocks new launches and is reconciled on session reload/reopen rather than silently relabelled disposed.
 
-## Local verification
+[Configuration and usage](../README.md#optional-isolated-execution) · [Exact contract](v0.1-contract.md#docker-copy-execution) · [Implementation record](plans/2026-09-07-isolated-delegation.md)
 
-- Fresh context-mode checkpoint checks: `npm test` **54 tests passed** across seven files, including 26 real-Pi/scripted-provider integration cases.
-- At the previous September 6 checkpoint, clean `npm ci` completed; dependency deprecation warnings for `node-domexception` remain upstream.
-- `npm run check`: TypeScript passed.
-- Previous September 6 checkpoint: `npm audit` reported zero vulnerabilities; dependencies are unchanged in this slice.
-- `npm pack --dry-run`: extension source, including context helpers and evidence retrieval, present; not a registry publication or end-user deployment test.
-- `git diff --check`: passed before checkpoint.
+## Fresh verification
 
-The AGY retrieval review identified pairing, fallback and command-recovery issues that were addressed with regression checks. Its sandbox could not perform local-HTTP integration validation (`connect EPERM`); those tests were verified in the primary checkout, not claimed as an independent reviewer pass.
+- **91 tests passed** with real Docker cases enabled, across nine files. This includes 37 real-Pi/scripted-provider integration cases, ten of them exercising Docker delegation; fourteen runner tests include twelve real-runtime cases.
+- TypeScript, `git diff --check` and package dry-run passed; the packaged source includes the snapshot importer and isolated Bash adapter.
+- Docker Desktop **29.4.0** on macOS, Linux/aarch64 daemon, existing Linux/amd64 fixture image `sha256:caf3ef82cd1d4ebd1724ed8374c8b2d8f1396bfab80c024489006d6093b19ad3` under emulation. No image pull/build or paid inference was needed for implementation checks. No labelled test containers remained.
+- Default tests passed **69 checks with 22 explicit skips**: real-runtime cases require `PI_SCOPES_TEST_DOCKER_IMAGE`. These are mechanics/boundary checks, not new model-effectiveness evidence or native-Linux validation.
 
-## Effectiveness evidence
+Static AGY review did not run commands. Regressions addressed cleanup state, deleted input, empty nested cwd and evidence outcome visibility. Driver investigation independently reproduced **Git clean-filter execution during `git status`**, then replaced that check with plumbing/index metadata and literal byte comparison. Docker import was also tested against read-only rootfs: ordinary `docker cp` failed, so import now streams an owned archive to the unprivileged guest without weakening the boundary. See the implementation record for remaining coverage gaps.
 
-See [evaluation policy and reports](../evals/README.md).
+Dependencies are unchanged. The prior September 6 checkpoint had a clean install and zero reported audit vulnerabilities; that historical audit is not a new security audit of this feature.
 
-- Easy paired pilot: both arms resolved; scopes reduced final parent context at higher time/estimated cost.
-- Harder study: unbounded children exhausted the experiment's former token allowance without useful returns; this motivated bounded investigation.
-- Bounded Django check: useful partial return and officially resolved parent patch, approximately $0.396 combined catalogue-equivalent cost.
-- Three-phase Django check: task resolved and final follow-up needed no tools, approximately $0.700; weak capsule evidence still caused earlier parent re-investigation.
-- GLM Flash synthetic retrieval check: correct facts, no work replay, approximately $0.00051; navigation succeeded but small pages caused avoidable calls.
-- [GLM Flash context-mode check](../evals/results/2026-09-07-glm-context-modes.md): two correct synthetic answers, expected fresh/fork selections, approximately $0.00119 combined. Fork also restated background in the goal: interface usability evidence, not proof of inheritance benefit.
+## Practical limits
 
-These are small, selected checks, not evidence of consistent superiority, post-compaction recovery, or general cost savings. Historical raw runs remain unchanged outside the repository; reports link their local artifact directories.
+- Docker input must match committed literal bytes: no dirty/non-ignored untracked changes, symlinks or submodules; maximum 12 MiB / 10,000 regular files. Ignored files and `.git` are excluded. Filters/line-ending conversions may cause otherwise Git-clean working files to be refused.
+- A committed secret or secret already in forked context is still disclosed to the child/model. No secret redaction or prompt-injection-proof conclusions.
+- Image and Docker CLI/daemon are trusted; image must already contain Bash, GNU tar and task dependencies. No automatic dependency installation or host fallback.
+- Experimental limits: 256 MiB memory, one CPU, 64 PIDs, 16 MiB each guest workspace/tmp; work output 1 MiB per command / 8 MiB per scope. These are resource-safety limits, not inference-spend cutoffs. Total model/event trace loading remains in-memory and is not bounded by the output cap.
+- No independent crash-time watchdog. An interrupted host or ambiguous daemon failure may leave a container until reconciliation. Container/kernel exploits, comprehensive egress/resource stress and native-Linux behavior have not been certified. Use monitored experimental workloads, not unattended hostile jobs.
+- No recursive/parallel/background children, automatic file export/merge, cross-session retrieval, semantic evidence search, or live child recovery.
 
-Current owner policy: judge output quality against best-effort combined dollar estimates, with uncached/cached input and output breakdowns. Spending guidance is soft; no future cumulative-token cutoff. Future paid test models are `zai/glm-5.3-flash` or `zai/glm-5.3`, subject to availability and explicitly recorded settings.
+## Effectiveness evidence so far
 
-## Owner decision: host prototype now, enforced isolation later
+[Evaluation policy and reports](../evals/README.md) preserve the frozen historical experiments:
 
-Keep current host execution enabled for prototyping speed (option A). Do not add a consent gate or model-facing permission-tier controls now. This is a deliberate trusted-host mode: children do not inherit parent permission hooks, and a separate worktree would not change that security boundary.
+- Easy paired SWE-bench pilot: both arms resolved; lower final parent context with scopes, but higher time/estimated cost.
+- Harder study exposed unbounded investigations failing to return useful results; this motivated turn-bounded investigation.
+- Bounded Django check resolved at approximately $0.396 combined estimate. Three-phase follow-up resolved at approximately $0.700, but weak capsules caused initial repeated investigation.
+- GLM retrieval fixture recovered evidence without replay for approximately $0.00051. Two context-mode fixtures selected expected modes and answered correctly for approximately $0.00119; no causal inheritance advantage was established.
+- Owner-authorized DeepSeek real-task design observation completed for approximately $0.01143 with 83.0% cached input. Follow-ups reused evidence without reopening source, but initial re-investigation and material factual errors remained. The driver corrected those errors before implementation.
 
-The intended audience includes other users. The later target is enforced sandbox isolation (option C), not consent alone. Before describing execution as isolated, specify and test filesystem/mount access, credentials, network/process access, resource limits, and any patch-promotion boundary. These details are not yet decided or implemented. Keep the current limitations conspicuous; the public-use target is not permission to publish the present prototype as sandboxed.
+These selected observations do not establish consistent superiority, comparative dollar savings or correctness of model conclusions. A `completed` capsule is not an independent verification badge. Context preservation can preserve mistakes too.
 
-## Context-mode checkpoint
+Owner policy remains output quality versus best-effort combined dollars, with uncached/cache-read/cache-write input and output breakdowns. Spending guidance is soft; no cumulative-token cutoff. Future paid test defaults remain GLM 5.3 Flash/GLM 5.3 unless the owner explicitly authorizes another model.
 
-Current API: `scope({ action: "run", context: "fresh" | "fork", goal })`, with fresh as default. The old model-facing `fork` action is removed, not aliased. Both modes share bounded execution, capsules, and retrieval. Fresh mode includes project guidance by default (`repoInstructions:false` opts out); fork snapshots the active parent branch before the invoking tool batch and reuses effective instructions, without importing permission hooks or extension runtimes. Copied historical usage is excluded from child billing totals. See the [current contract](v0.1-contract.md) for exact boundaries. Historical experiment reports/runners retain the API they actually used. Local context-mode validation has **54 passing tests** plus TypeScript checks. The separate GLM observation supports basic interface usability; it does not establish difficult-task effectiveness or comparative savings.
+## Next meaningful work
 
-## Next priorities
-
-1. **Sandbox design:** the [boundary proposal](plans/2026-09-07-sandbox-boundary-proposal.md) recommends host inference with all child work routed through containerized Bash, no host-backed file tools, and no automatic promotion. The owner approved Docker as the first backend; an internal command-runner spike is implemented and locally tested, but not connected to scope execution or a public isolation claim. Keep context choice independent of execution authority. Worktrees and reviewed patch promotion cannot replace isolation.
-2. **Release readiness:** consolidated compatibility/security review and installation checks before making a public package recommendation.
-3. **Targeted effectiveness:** only test a remaining claim, such as long-history handoff quality, rather than replay successful demos. Guidance is not an access-control mechanism.
-
-## Post-checkpoint real-task observation
-
-The owner authorized `deepseek/deepseek-v4-flash` for one retry after GLM refused the initial request on quota grounds. The [sandbox-design observation](../evals/results/2026-09-07-deepseek-sandbox-design.md) completed three phases for approximately **$0.01143**, **83.0% cached input**. The first follow-up used retained evidence without reopening source; the second needed no tools. Initial source rereading still occurred, and driver review corrected material mistakes in the conclusions. The child also reported complete after acknowledging uninspected sources at the investigation limit. This demonstrates usable retrieval, not independently verified conclusions, comparative savings or an implemented sandbox. The proposal and report are post-checkpoint work; runtime source remains at the checkpoint.
-
-## Docker command-runner spike — 2026-09-07
-
-`src/runtime/docker.ts` implements an internal `BashOperations`-compatible runner with one disposable container, pinned local image identity, no host mounts/env forwarding/network, non-root read-only root plus limited writable tmpfs, bounded command output, and whole-container removal on abort/timeout/overflow. It refuses new commands after disposal starts, even if cleanup fails; an explicit disposal retry remains possible. No host fallback.
-
-Fresh verification: **67 tests passed** with the Docker cases enabled, plus TypeScript and diff checks. The runner contributes 13 cases (two Docker-independent, eleven real-runtime); default tests skip the eleven unless an image is explicitly selected. Tested on macOS with Docker Desktop **29.4.0**, Linux/aarch64 daemon, existing Linux/amd64 image `sha256:caf3ef82cd1d4ebd1724ed8374c8b2d8f1396bfab80c024489006d6093b19ad3` under emulation. No image pull/build or paid inference. No labelled test containers remained afterward. This is not native-Linux validation.
-
-Static AGY review prompted failing regression checks for synchronous command-setup errors, external disposal reporting, cleanup retry state and pre-aborted cleanup failures; these were fixed and rerun in the primary checkout. The reviewer did not run tests. See the [implementation record](plans/2026-09-07-docker-command-runner.md) for precise limits.
-
-**Not activated:** `scope run` still uses the original host tools. The adapter does not yet import repository files, own the SDK's overflow files, connect scope-wide lifetime/cancellation, reconcile crashes, select execution policy, export artifacts or promote patches. Network enforcement was inspected in Docker configuration, not tested against controlled endpoints; runtime PID/memory/CPU limits likewise need adversarial stress coverage beyond the tested tmpfs/output caps. Do not call this a finished sandbox.
-
-## Deliberate limits
-
-No sandbox, parallel/recursive/background children, worktree isolation, live child recovery, semantic evidence search, cross-session retrieval, or secret redaction. Turn limits are not token/cost caps; a hard timeout may still prevent a useful return. Retained records are historical and may be stale. Trace/blob loading is in-memory despite bounded response pages. Corrupt storage may surface errors rather than being repaired.
-
-**Checkpoint meaning:** preserve the complete tested milestone in Git so further trust-boundary work has a stable starting point. It is not permission to publish, push, or expand the roadmap.
+1. Use the now-integrated isolated mode for a substantive repository task and evidence-dependent follow-up; measure quality/repeated work, not another easy interface demo.
+2. Address concrete workflow limits observed there, especially input/dependency ergonomics and explicit verification provenance. Avoid automatic promotion until its separate trust boundary is designed/tested.
+3. Before public recommendation: native-Linux/macOS compatibility, installation checks, adversarial runtime review and clear unattended-use limits. No publication or push is implied by this checkpoint.

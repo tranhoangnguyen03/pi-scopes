@@ -13,12 +13,17 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
-export async function projectGuidance(cwd: string): Promise<{ path: string; content: string }[]> {
+export async function projectGuidance(cwd: string, snapshotRoot?: string): Promise<{ path: string; content: string }[]> {
   const start = await realpath(cwd);
-  let root = start;
-  for (let dir = start; ; dir = path.dirname(dir)) {
-    if (await exists(path.join(dir, ".git"))) { root = dir; break; }
-    if (path.dirname(dir) === dir) break;
+  let root = snapshotRoot ? await realpath(snapshotRoot) : start;
+  if (snapshotRoot) {
+    const relative = path.relative(root, start);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Guidance cwd is outside snapshot");
+  } else {
+    for (let dir = start; ; dir = path.dirname(dir)) {
+      if (await exists(path.join(dir, ".git"))) { root = dir; break; }
+      if (path.dirname(dir) === dir) break;
+    }
   }
   const dirs = [start];
   while (dirs[0] !== root) dirs.unshift(path.dirname(dirs[0]!));

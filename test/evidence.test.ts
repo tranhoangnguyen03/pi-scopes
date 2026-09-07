@@ -43,6 +43,16 @@ describe("bounded recorded evidence", () => {
     expect(index).not.toContain("2. scope_return");
   });
 
+  it.each([{ exitCode: 42, error: undefined, expected: "exit 42" }, { exitCode: null, error: "timeout:3", expected: "execution stopped" }])("preserves command outcome alongside an owned output blob: $expected", async ({ exitCode, error, expected }) => {
+    const blobRef = await store.saveEvidenceBlob(id, Buffer.from("retained raw output"));
+    await record(2, "bounded tail", { blobRef, exitCode, ...(error ? { error } : {}) });
+    expect(await readEvidence(store, id)).toContain(expected);
+    const result = await readEvidence(store, id, 1);
+    expect(result).toContain(expected);
+    expect(result).toContain("retained raw output");
+    if (error) expect(result).toContain(error);
+  });
+
   it("paginates indexes and Unicode output with ready-to-use continuation calls", async () => {
     for (let n = 1; n <= 11; n++) await record(n, "🙂".repeat(3000));
     const index = await readEvidence(store, id);

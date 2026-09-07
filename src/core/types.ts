@@ -5,7 +5,8 @@ export const SCOPE_SCHEMA_VERSION = 1 as const;
 export type ScopeId = string;
 export type ContextMode = "fresh" | "fork";
 export type ScopeStatus = "active" | "completed" | "partial" | "failed" | "cancelled";
-export type RuntimeState = "active" | "disposed";
+export type RuntimeState = "active" | "disposed" | "cleanup-failed";
+export type WorkspaceMode = "host-shared" | "docker-copy";
 
 export interface ScopeBudget {
   timeoutMs: number;
@@ -20,12 +21,15 @@ export interface ScopeRecord {
   goal: string;
   context?: ContextMode;
   status: ScopeStatus;
-  workspaceMode: "host-shared";
+  workspaceMode: WorkspaceMode;
   cwd: string;
   budget: ScopeBudget;
   runtime: {
     state: RuntimeState;
     scratchPath?: string;
+    image?: string;
+    containerName?: string;
+    sourceRevision?: string;
   };
   traceRef: string;
   resultRef?: string;
@@ -58,6 +62,8 @@ export interface ResultCapsule extends ResultCapsuleInput {
   status: Exclude<ScopeStatus, "active">;
   scopeId: ScopeId;
   context?: ContextMode;
+  workspaceMode?: WorkspaceMode;
+  sourceRevision?: string;
   traceRef: string;
   fallbackReason?: string;
   error?: string;

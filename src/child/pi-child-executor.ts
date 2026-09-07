@@ -1,4 +1,5 @@
 import path from "node:path";
+import { realpath } from "node:fs/promises";
 import {
   createAgentSession,
   createBashToolDefinition,
@@ -18,6 +19,9 @@ import { ChildTraceRecorder } from "../trace/child-trace-recorder.js";
 import { createScopeReturnTool } from "./return-tool.js";
 import type { ParentSnapshot } from "./context.js";
 import { projectGuidance } from "./project-guidance.js";
+import { DockerRuntime } from "../runtime/docker.js";
+import { snapshotProject } from "../runtime/project-snapshot.js";
+import { dockerBash } from "./docker-bash.js";
 
 export interface ChildRunRequest {
   scope: ScopeRecord;
@@ -58,13 +62,18 @@ function collectUsage(session: AgentSession, inherited: ReadonlySet<string>): Ch
   return total;
 }
 
-function childInstructions(scope: ScopeRecord): string {
+function childInstructions(scope: ScopeRecord, mapping?: { cwd: string; sourceRoot: string }): string {
   return [
     "You are a focused child session working for a parent Pi agent.",
     `Goal: ${scope.goal}`,
     `Scope ID: ${scope.id}`,
-    `Workspace mode: ${scope.workspaceMode}. The workspace is shared with the parent and is not a security boundary.`,
-    `Use ${scope.runtime.scratchPath ?? "the assigned scratch directory"} for temporary scripts, downloads, and logs.`,
+    ...(mapping ? [`Path mapping: source project ${mapping.sourceRoot} is copied to /workspace. Parent cwd ${scope.cwd} corresponds to guest cwd ${mapping.cwd}. Translate source paths accordingly.`] : []),
+    scope.workspaceMode === "docker-copy"
+      ? "Workspace mode: docker-copy. All work runs in a disposable committed project copy under /workspace; no host mounts, network or automatic promotion. Only Bash and scope_return exist. Host paths in inherited text are not accessible: use the guest cwd. Read/search/edit using shell commands, not unavailable host tools."
+      : `Workspace mode: ${scope.workspaceMode}. The workspace is shared with the parent and is not a security boundary.`,
+    scope.workspaceMode === "docker-copy"
+      ? "Use /tmp for temporary files. Guest files disappear at scope end. Preserve needed findings/diffs as command output for retained evidence; do not promise durable guest artifact paths. Dependencies must already be available; missing tools or dependencies require a partial result, not network installation or host fallback."
+      : `Use ${scope.runtime.scratchPath ?? "the assigned scratch directory"} for temporary scripts, downloads, and logs.`,
     "Investigate only the assigned goal. Preserve concrete evidence such as paths, symbols, commands, and test results.",
     scope.context === "fork"
       ? "You inherit a snapshot of the parent conversation and instructions, not live updates. Focus on the assigned goal. Parent tools/permissions are not inherited; only the currently supplied child tools are available."
@@ -82,6 +91,53 @@ export class PiChildExecutor implements ChildExecutor {
   constructor(private readonly store: ScopeStore) {}
 
   async run(request: ChildRunRequest): Promise<ChildExecutionResult> {
+    if (request.scope.workspaceMode !== "docker-copy") return this.runSession(request);
+    request.signal.throwIfAborted();
+    if (!request.parent.model) return { status: "failed", error: "The parent has no selected model", usage: emptyUsage() };
+    let runtime: DockerRuntime | undefined;
+    let result: ChildExecutionResult = { status: "failed", usage: emptyUsage() };
+    let commandFailure: string | undefined;
+    try {
+      if (!request.scope.runtime.scratchPath || !request.scope.runtime.image) throw new Error("Docker execution requires owned scratch and a pinned image");
+      const input = path.join(request.scope.runtime.scratchPath, "input");
+      const snapshot = await snapshotProject(request.scope.cwd, input, request.signal);
+      const inputRoot = await realpath(input);
+      const copiedCwd = path.join(inputRoot, ...path.posix.relative("/workspace", snapshot.cwd).split("/"));
+      const guidance = !request.snapshot && request.repoInstructions !== false
+        ? (await projectGuidance(copiedCwd, inputRoot)).map((file) => ({ ...file, path: path.posix.join("/workspace", ...path.relative(inputRoot, file.path).split(path.sep)) })) : [];
+      request.scope.runtime.sourceRevision = snapshot.commit;
+      await this.store.appendTrace(request.scope.id, "scope.workspace", snapshot);
+      request.signal.throwIfAborted();
+      runtime = await DockerRuntime.create(request.scope.runtime.image, async (name) => {
+        request.scope.runtime.containerName = name;
+        await this.store.saveScope(request.scope);
+      }, request.signal);
+      await this.store.appendTrace(request.scope.id, "docker.created", { name: runtime.name, image: request.scope.runtime.image });
+      request.signal.throwIfAborted();
+      await runtime.importDirectory(input, request.signal);
+      request.signal.throwIfAborted();
+      result = await this.runSession(request, { cwd: snapshot.cwd, sourceRoot: snapshot.root, guidance,
+        bash: dockerBash(runtime, snapshot.cwd, this.store, request.scope.id, (error) => { commandFailure = error; }) });
+      if (commandFailure && !request.signal.aborted) result = { ...result, status: "failed", error: commandFailure };
+    } catch (error) {
+      result = { ...result, status: request.signal.aborted ? "cancelled" : "failed", error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (request.scope.runtime.containerName) {
+        try {
+          if (runtime) await runtime.dispose();
+          else await DockerRuntime.recover(request.scope.runtime.containerName);
+          request.scope.runtime.state = "disposed";
+        } catch (error) {
+          request.scope.runtime.state = "cleanup-failed";
+          result = { ...result, status: "failed", error: `Docker cleanup unverified for ${request.scope.runtime.containerName}: ${error instanceof Error ? error.message : String(error)}` };
+        }
+        await this.store.saveScope(request.scope);
+      }
+    }
+    return result;
+  }
+
+  private async runSession(request: ChildRunRequest, environment?: { cwd: string; sourceRoot: string; guidance: { path: string; content: string }[]; bash: ToolDefinition<any> }): Promise<ChildExecutionResult> {
     request.signal.throwIfAborted();
     if (!request.parent.model) {
       return { status: "failed", error: "The parent has no selected model", usage: emptyUsage() };
@@ -93,7 +149,8 @@ export class PiChildExecutor implements ChildExecutor {
       captured = capsule;
       capturedStatus = outcome === "partial" ? "partial" : "completed";
     });
-    const scopedBash = createBashToolDefinition(request.scope.cwd, {
+    const cwd = environment?.cwd ?? request.scope.cwd;
+    const scopedBash = environment?.bash ?? createBashToolDefinition(cwd, {
       spawnHook: ({ command, cwd, env }) => ({
         command,
         cwd,
@@ -109,9 +166,9 @@ export class PiChildExecutor implements ChildExecutor {
     });
 
     const inherited = new Set(request.snapshot?.entries.map((entry) => entry.id) ?? []);
-    const childSessionManager = SessionManager.inMemory(request.scope.cwd, undefined, request.snapshot?.entries);
+    const childSessionManager = SessionManager.inMemory(cwd, undefined, request.snapshot?.entries);
     const agentDir = getAgentDir();
-    const guidance = !request.snapshot && request.repoInstructions !== false ? await projectGuidance(request.scope.cwd) : [];
+    const guidance = environment?.guidance ?? (!request.snapshot && request.repoInstructions !== false ? await projectGuidance(request.scope.cwd) : []);
     await this.store.appendTrace(request.scope.id, "scope.context", {
       mode: request.scope.context ?? "fresh",
       guidance: request.snapshot ? "inherited system prompt" : request.repoInstructions === false ? "disabled" : "project files",
@@ -124,7 +181,7 @@ export class PiChildExecutor implements ChildExecutor {
       retry: { enabled: true, maxRetries: 1 },
     });
     const loader = new DefaultResourceLoader({
-      cwd: request.scope.cwd,
+      cwd,
       agentDir,
       settingsManager: settings,
       noExtensions: true,
@@ -133,8 +190,8 @@ export class PiChildExecutor implements ChildExecutor {
       noThemes: true,
       noContextFiles: true,
       agentsFilesOverride: () => ({ agentsFiles: guidance }),
-      appendSystemPrompt: request.snapshot ? [] : [childInstructions(request.scope)],
-      ...(request.snapshot ? { systemPromptOverride: () => `${request.snapshot!.systemPrompt}\n\n# Current child assignment (overrides parent orchestration instructions)\n${childInstructions(request.scope)}` } : {}),
+      appendSystemPrompt: request.snapshot ? [] : [childInstructions(request.scope, environment)],
+      ...(request.snapshot ? { systemPromptOverride: () => `${request.snapshot!.systemPrompt}\n\n# Current child assignment (overrides parent orchestration instructions)\n${childInstructions(request.scope, environment)}` } : {}),
     });
     await loader.reload();
 
@@ -144,12 +201,12 @@ export class PiChildExecutor implements ChildExecutor {
       refreshOnCreate: false,
     }));
     const { session } = await createAgentSession({
-      cwd: request.scope.cwd,
+      cwd,
       agentDir,
       model: request.parent.model,
       ...(request.parent.thinkingLevel ? { thinkingLevel: request.parent.thinkingLevel } : {}),
       modelRuntime: runtime,
-      tools: ["read", "bash", "grep", "find", "ls", "scope_return"],
+      tools: environment ? ["bash", "scope_return"] : ["read", "bash", "grep", "find", "ls", "scope_return"],
       customTools: [scopedBash, returnTool] as ToolDefinition<any, any, any>[],
       resourceLoader: loader,
       sessionManager: childSessionManager,

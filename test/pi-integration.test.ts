@@ -1,4 +1,6 @@
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,6 +13,7 @@ import { PiChildExecutor } from "../src/child/pi-child-executor.js";
 import { ScopeKernel } from "../src/core/scope-kernel.js";
 import { ScopeStore } from "../src/storage/scope-store.js";
 import { ChildTraceRecorder } from "../src/trace/child-trace-recorder.js";
+import { DockerRuntime } from "../src/runtime/docker.js";
 
 interface RequestBody {
   model: string;
@@ -29,6 +32,9 @@ let requested: Promise<void>;
 let onRequested: () => void;
 let parentSession: AgentSession | undefined;
 let contextMode: "fresh" | "fork" | undefined;
+let dockerCommand: string | undefined;
+const dockerImage = process.env.PI_SCOPES_TEST_DOCKER_IMAGE;
+const exec = promisify(execFile);
 
 const findings = {
   summary: "Located the evidence", evidence: [{ summary: "fixture evidence", source: "evidence.txt:1" }],
@@ -39,8 +45,10 @@ beforeEach(async () => {
   directory = await mkdtemp(path.join(tmpdir(), "pi-scopes-integration-"));
   vi.stubEnv("PI_CODING_AGENT_DIR", directory);
   vi.stubEnv("PI_OFFLINE", "1");
+  vi.stubEnv("PI_SCOPES_EXECUTION", "host");
   mode = "return";
   contextMode = undefined;
+  dockerCommand = undefined;
   requests = [];
   requested = new Promise<void>((resolve) => { onRequested = resolve; });
   returnRequested = new Promise<void>((resolve) => { onReturnRequested = resolve; });
@@ -60,9 +68,9 @@ beforeEach(async () => {
     if (returnOnly) onReturnRequested();
     if (returnOnly && mode === "wait-return") return;
     const investigate = child && ((["budget", "repair-return", "wait-return"].includes(mode) && !returnOnly) || mode === "ignore-return");
-    const name = child ? (investigate ? "read" : hasResult ? "scope_return" : "read") : "scope";
+    const name = child ? (investigate ? "read" : hasResult ? "scope_return" : dockerCommand ? "bash" : "read") : "scope";
     let args: Record<string, unknown> = child
-      ? (name === "scope_return" ? { outcome: mode === "partial-return" || returnOnly ? "partial" : "complete", ...findings } : { path: "evidence.txt" })
+      ? (name === "scope_return" ? { outcome: mode === "partial-return" || returnOnly ? "partial" : "complete", ...findings } : name === "bash" ? { command: dockerCommand } : { path: "evidence.txt" })
       : { action: "run", ...(contextMode ? { context: contextMode } : {}), goal: "Investigate evidence.txt", timeoutSeconds: 5 };
     if (returnOnly && mode === "repair-return" && requests.filter((request) => request.tools.length === 1).length === 1) {
       Object.assign(args, { summary: "" });
@@ -124,7 +132,180 @@ function parent() {
   return { model, thinkingLevel: "off" as const };
 }
 
+async function committedWorkspace() {
+  const cwd = path.join(directory, "workspace");
+  await mkdir(cwd);
+  await writeFile(path.join(cwd, "evidence.txt"), "fixture evidence\n");
+  await writeFile(path.join(cwd, "AGENTS.md"), "SNAPSHOT_GUIDANCE");
+  for (const args of [["init", "-q"], ["add", "."], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]]) {
+    await exec("git", ["-C", cwd, ...args]);
+  }
+  vi.stubEnv("PI_SCOPES_EXECUTION", "docker");
+  vi.stubEnv("PI_SCOPES_DOCKER_IMAGE", dockerImage!);
+  return cwd;
+}
+
+describe.skipIf(!dockerImage)("isolated delegation through real Pi and Docker", () => {
+  it.each(["fresh", "fork"] as const)("runs %s against a copy and retains output after cleanup", async (context) => {
+    const cwd = await committedWorkspace();
+    mode = "retrieve";
+    contextMode = context;
+    dockerCommand = "cat evidence.txt; printf changed > evidence.txt; head -c 12000 /dev/zero | tr '\\0' x; printf RETAINED_DOCKER_TAIL";
+    const settingsManager = SettingsManager.inMemory();
+    const loader = new DefaultResourceLoader({ cwd, agentDir: directory, settingsManager, noExtensions: true, noSkills: true,
+      noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: [piScopes] });
+    await loader.reload();
+    ({ session: parentSession } = await createAgentSession({ cwd, agentDir: directory, ...parent(), modelRuntime: runtime,
+      tools: ["scope"], resourceLoader: loader, settingsManager, sessionManager: SessionManager.inMemory(cwd) }));
+    await parentSession.prompt("PARENT_DOCKER_BACKGROUND: investigate in the selected environment.");
+    const children = requests.filter((request) => request.tools.some((tool) => tool.function.name === "scope_return"));
+    expect(children[0]?.tools.map((tool) => tool.function.name).sort()).toEqual(["bash", "scope_return"]);
+    expect(JSON.stringify(children)).toContain("/workspace");
+    expect(JSON.stringify(children).includes("PARENT_DOCKER_BACKGROUND")).toBe(context === "fork");
+    expect(JSON.stringify(children).includes("SNAPSHOT_GUIDANCE")).toBe(context === "fresh");
+    if (context === "fresh") expect(JSON.stringify(children[0]?.messages)).toContain('/workspace/AGENTS.md');
+    expect(await readFile(path.join(cwd, "evidence.txt"), "utf8")).toBe("fixture evidence\n");
+    const store = new ScopeStore(path.join(directory, "scope-data"), parentSession.sessionId);
+    const scope = (await store.listScopes()).find((record) => record.kind === "subsession")!;
+    expect(scope).toMatchObject({ workspaceMode: "docker-copy", status: "completed", runtime: { state: "disposed" } });
+    expect(await store.readResult(scope.id)).toMatchObject({ workspaceMode: "docker-copy", usage: { input: 20, output: 8 } });
+    const events = await store.readTrace(scope.id);
+    const output = events.find((event) => event.type === "pi.tool_execution_end" && (event.data as any).toolName === "bash")!.data as any;
+    expect(await store.readEvidenceBlob(scope.id, output.result.details.blobRef)).toContain("RETAINED_DOCKER_TAIL");
+    const beforeRetrieval = requests.filter((request) => request.tools.some((tool) => tool.function.name === "scope"))[1];
+    expect(JSON.stringify(beforeRetrieval?.messages)).not.toContain("RETAINED_DOCKER_TAIL");
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain("Recorded output:");
+    await expect(access(store.scratchPath(scope.id))).rejects.toThrow();
+  }, 90_000);
+
+  it("denies host-backed tools even if the model attempts to call one", async () => {
+    const cwd = await committedWorkspace();
+    const kernel = await createKernel(cwd);
+    const result = await kernel.fork({ goal: "Investigate", parent: parent() });
+    expect(result.error).toBeUndefined();
+    const messages = JSON.stringify(requests);
+    expect(messages).toContain("Tool read not found");
+    expect(messages).not.toContain("fixture evidence\\n");
+  }, 90_000);
+
+  it("removes an idle container when parent cancellation interrupts inference", async () => {
+    const cwd = await committedWorkspace();
+    mode = "wait";
+    const kernel = await createKernel(cwd);
+    const controller = new AbortController();
+    const pending = kernel.fork({ goal: "Investigate", parent: parent(), signal: controller.signal });
+    await Promise.race([requested, pending.then((result) => { throw new Error(`Child never requested inference: ${JSON.stringify(result)}`); })]);
+    controller.abort();
+    const result = await pending;
+    expect(result).toMatchObject({ status: "cancelled", workspaceMode: "docker-copy" });
+    const scope = kernel.scopes.get(result.scopeId)!;
+    expect(scope.runtime.state).toBe("disposed");
+    const identity = (await kernel.store.readTrace(scope.id)).find((event) => event.type === "docker.created")?.data as any;
+    expect(identity?.name).toMatch(/^pi-scopes-/);
+    const remaining = await exec("docker", ["ps", "-aq", "--filter", `name=^/${identity.name}$`]);
+    expect(remaining.stdout.trim()).toBe("");
+  }, 90_000);
+
+  it("supports an empty nested cwd with root guidance and copy-relative paths", async () => {
+    const root = await committedWorkspace();
+    const cwd = path.join(root, "empty");
+    await mkdir(cwd);
+    dockerCommand = "pwd; cat ../evidence.txt";
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Investigate", parent: parent() });
+    expect(capsule.status).toBe("completed");
+    expect(JSON.stringify(requests)).toContain("/workspace/empty");
+    expect(JSON.stringify(requests)).toContain("SNAPSHOT_GUIDANCE");
+    expect(capsule.sourceRevision).toMatch(/^[a-f0-9]{40,64}$/);
+  }, 90_000);
+
+  it("honors cancellation after recording identity but before container creation", async () => {
+    const cwd = await committedWorkspace();
+    const kernel = await createKernel(cwd);
+    const controller = new AbortController();
+    const original = kernel.store.saveScope.bind(kernel.store);
+    vi.spyOn(kernel.store, "saveScope").mockImplementation(async (scope) => {
+      await original(scope);
+      if (scope.runtime.containerName) controller.abort();
+    });
+    const capsule = await kernel.fork({ goal: "Investigate", parent: parent(), signal: controller.signal });
+    expect(capsule.status).toBe("cancelled");
+    expect(requests).toHaveLength(0);
+    const scope = kernel.scopes.get(capsule.scopeId)!;
+    expect(scope.runtime.state).toBe("disposed");
+    expect((await exec("docker", ["ps", "-aq", "--filter", `name=^/${scope.runtime.containerName}$`])).stdout.trim()).toBe("");
+  }, 90_000);
+
+  it("retains failed-command output and reports the command exit code", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "printf FAILURE_EVIDENCE; exit 42";
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Inspect failure", parent: parent() });
+    const event = (await kernel.store.readTrace(capsule.scopeId)).find((event) => event.type === "pi.tool_execution_end" && (event.data as any).toolName === "bash")!.data as any;
+    expect(event.result.details.exitCode).toBe(42);
+    expect(await kernel.store.readEvidenceBlob(capsule.scopeId, event.result.details.blobRef)).toBe("FAILURE_EVIDENCE");
+  }, 90_000);
+
+  it("propagates cancellation from the parent while a guest command is running", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "echo ready; sleep 300";
+    const kernel = await createKernel(cwd);
+    const controller = new AbortController();
+    const capsule = await kernel.fork({ goal: "Investigate", parent: parent(), signal: controller.signal,
+      onActivity: (_scope, label) => { if (label === "tool_execution_update") controller.abort(); } });
+    expect(capsule.status).toBe("cancelled");
+    const record = kernel.scopes.get(capsule.scopeId)!;
+    expect(record.runtime.state).toBe("disposed");
+    expect((await exec("docker", ["ps", "-aq", "--filter", `name=^/${record.runtime.containerName}$`])).stdout.trim()).toBe("");
+  }, 90_000);
+
+  it("preserves cleanup failure, blocks new work, and reconciles on reopen", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "echo finished";
+    const kernel = await createKernel(cwd);
+    const disposal = vi.spyOn(DockerRuntime.prototype, "dispose").mockRejectedValue(new Error("fixture daemon unavailable"));
+    let name: string | undefined;
+    try {
+      const capsule = await kernel.fork({ goal: "Investigate", parent: parent() });
+      name = kernel.scopes.get(capsule.scopeId)!.runtime.containerName;
+      expect(capsule.status).toBe("failed");
+      expect(kernel.scopes.get(capsule.scopeId)!.runtime.state).toBe("cleanup-failed");
+      expect((await kernel.store.readTrace(capsule.scopeId)).some((event) => event.type === "runtime.disposed")).toBe(false);
+      await expect(kernel.fork({ goal: "Do not launch", parent: parent() })).rejects.toThrow(/cleanup is unverified/);
+      disposal.mockRestore();
+      const reopened = await createKernel(cwd);
+      expect(reopened.scopes.get(capsule.scopeId)!.runtime.state).toBe("disposed");
+      expect((await exec("docker", ["ps", "-aq", "--filter", `name=^/${name}$`])).stdout.trim()).toBe("");
+    } finally {
+      disposal.mockRestore();
+      if (name) await DockerRuntime.recover(name);
+    }
+  }, 90_000);
+
+  it("refuses dirty input before child inference and never falls back to the host", async () => {
+    const cwd = await committedWorkspace();
+    await writeFile(path.join(cwd, "evidence.txt"), "uncommitted change");
+    const kernel = await createKernel(cwd);
+    const result = await kernel.fork({ goal: "Investigate", parent: parent() });
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("clean committed");
+    expect(requests).toHaveLength(0);
+  }, 90_000);
+});
+
 describe("real Pi integration with a local scripted provider", () => {
+  it("rejects invalid owner execution configuration without inference", async () => {
+    const kernel = await createKernel();
+    vi.stubEnv("PI_SCOPES_EXECUTION", "typo");
+    await expect(kernel.fork({ goal: "Investigate", parent: parent() })).rejects.toThrow("PI_SCOPES_EXECUTION");
+    vi.stubEnv("PI_SCOPES_EXECUTION", "docker");
+    vi.stubEnv("PI_SCOPES_DOCKER_IMAGE", "");
+    await expect(kernel.fork({ goal: "Investigate", parent: parent() })).rejects.toThrow("PI_SCOPES_DOCKER_IMAGE");
+    vi.stubEnv("PI_SCOPES_DOCKER_IMAGE", "ubuntu:latest");
+    await expect(kernel.fork({ goal: "Investigate", parent: parent() })).rejects.toThrow("PI_SCOPES_DOCKER_IMAGE");
+    expect(requests).toHaveLength(0);
+  });
+
   it.each(["fresh", "fork"] as const)("delivers evidence without transcript pollution or double-counting with %s context", async (context) => {
     contextMode = context;
     const history = SessionManager.inMemory(directory);
