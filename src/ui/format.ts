@@ -42,6 +42,20 @@ export function formatCapsule(capsule: ResultCapsule): string {
     ...(capsule.sourceRevision ? [`Project copy: ${capsule.sourceRevision}; guest files are not promoted or retained.`] : []),
     capsule.summary,
   ];
+  if (capsule.patch) {
+    if (capsule.patch.status === "captured" && capsule.patch.blobRef) {
+      const stats = capsule.patch.stats
+        ? ` (${capsule.patch.stats.files} file${capsule.patch.stats.files === 1 ? "" : "s"}, +${capsule.patch.stats.additions} -${capsule.patch.stats.deletions})`
+        : "";
+      lines.push(`Workspace patch: captured${stats}\nRef: ${capsule.patch.blobRef}\nSource: ${capsule.patch.sourceRevision ?? capsule.sourceRevision}`);
+    } else if (capsule.patch.status === "no-change") {
+      lines.push(`Workspace patch: no changes from source revision ${capsule.patch.sourceRevision ?? capsule.sourceRevision}.`);
+    } else if (capsule.patch.status === "error") {
+      lines.push(`Workspace patch: capture failed: ${capsule.patch.error}`);
+    } else if (capsule.patch.status === "unavailable") {
+      lines.push(`Workspace patch: unavailable${capsule.patch.error ? ` (${capsule.patch.error})` : ""}.`);
+    }
+  }
   if (capsule.conclusions?.length) lines.push(`Conclusions:\n${capsule.conclusions.map((item) => `- ${item}`).join("\n")}`);
   if (capsule.evidence?.length) lines.push(`Evidence:\n${capsule.evidence.map((item) => `- ${item.summary}${item.source ? ` (${item.source})` : ""}`).join("\n")}`);
   if (capsule.artifacts?.length) lines.push(`Artifacts:\n${capsule.artifacts.map((item) => `- ${item.label}: ${item.ref}`).join("\n")}`);

@@ -35,6 +35,13 @@ export class ScopeManager {
           unresolved: [message],
           fallbackReason: message,
           error: message,
+          ...(record.workspaceMode === "docker-copy" ? {
+            patch: {
+              status: "unavailable",
+              error: message,
+              ...(record.runtime.sourceRevision ? { sourceRevision: record.runtime.sourceRevision } : {}),
+            },
+          } : {}),
         };
         await this.store.removeScratch(record.id);
         await this.store.appendTrace(record.id, "scope.interrupted", { error: message });

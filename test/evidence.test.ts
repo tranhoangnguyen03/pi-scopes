@@ -27,6 +27,16 @@ async function record(n: number, output = "recorded assertion failure", details 
 }
 
 describe("bounded recorded evidence", () => {
+  it.each(["unavailable", "error", "no-change"] as const)("reads %s patch metadata even without a capture trace event", async (status) => {
+    await store.saveResult({ scopeId: id, status: "cancelled", traceRef: store.traceRef(id), summary: "Stopped",
+      patch: { status, sourceRevision: "abc123", ...(status !== "no-change" ? { error: "capture interrupted" } : {}) } });
+    expect(await readEvidence(store, id)).toContain("1. workspace.patch");
+    const result = await readEvidence(store, id, 1);
+    expect(result).toContain(status);
+    expect(result).toContain("abc123");
+    if (status !== "no-change") expect(result).toContain("capture interrupted");
+  });
+
   it("lists literal numbered records and reads paired arguments/results without assistant text", async () => {
     await record(1);
     await store.appendTrace(id, "pi.message_end", { message: { role: "assistant", content: "PRIVATE_THINKING" } });

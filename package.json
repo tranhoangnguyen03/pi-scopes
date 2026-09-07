@@ -7,6 +7,9 @@
   "private": true,
   "files": [
     "src",
+    "docs",
+    "evals/README.md",
+    "evals/results",
     "README.md",
     "LICENSE"
   ],

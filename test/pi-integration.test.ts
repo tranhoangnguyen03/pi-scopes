@@ -12,6 +12,7 @@ import piScopes from "../src/index.js";
 import { PiChildExecutor } from "../src/child/pi-child-executor.js";
 import { ScopeKernel } from "../src/core/scope-kernel.js";
 import { ScopeStore } from "../src/storage/scope-store.js";
+import { readEvidence } from "../src/trace/evidence.js";
 import { ChildTraceRecorder } from "../src/trace/child-trace-recorder.js";
 import { DockerRuntime } from "../src/runtime/docker.js";
 
@@ -33,6 +34,7 @@ let onRequested: () => void;
 let parentSession: AgentSession | undefined;
 let contextMode: "fresh" | "fork" | undefined;
 let dockerCommand: string | undefined;
+let secondDockerCommand: string | undefined;
 const dockerImage = process.env.PI_SCOPES_TEST_DOCKER_IMAGE;
 const exec = promisify(execFile);
 
@@ -49,6 +51,7 @@ beforeEach(async () => {
   mode = "return";
   contextMode = undefined;
   dockerCommand = undefined;
+  secondDockerCommand = undefined;
   requests = [];
   requested = new Promise<void>((resolve) => { onRequested = resolve; });
   returnRequested = new Promise<void>((resolve) => { onReturnRequested = resolve; });
@@ -88,6 +91,10 @@ beforeEach(async () => {
       role: "assistant", tool_calls: [{ index: 0, id: `call_${requests.length}`, type: "function",
         function: { name, arguments: JSON.stringify(args) } }],
     };
+    if (!finish && child && name === "bash" && secondDockerCommand && "tool_calls" in delta) {
+      delta.tool_calls.push({ index: 1, id: `call_${requests.length}_second`, type: "function",
+        function: { name: "bash", arguments: JSON.stringify({ command: secondDockerCommand }) } });
+    }
     res.end(`data: ${JSON.stringify({
       id: `completion_${requests.length}`, object: "chat.completion.chunk", created: 1, model: "fixture",
       choices: [{ index: 0, delta, finish_reason: finish ? "stop" : "tool_calls" }],
@@ -176,6 +183,31 @@ describe.skipIf(!dockerImage)("isolated delegation through real Pi and Docker", 
     expect(JSON.stringify(beforeRetrieval?.messages)).not.toContain("RETAINED_DOCKER_TAIL");
     expect(JSON.stringify(requests.at(-1)?.messages)).toContain("Recorded output:");
     await expect(access(store.scratchPath(scope.id))).rejects.toThrow();
+  }, 90_000);
+
+  it("serializes Bash calls from one model response and retains both outputs", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "sleep 0.2; printf FIRST > evidence.txt; cat evidence.txt";
+    secondDockerCommand = "cat evidence.txt; printf SECOND";
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Run both commands", parent: parent() });
+    expect(capsule.status).toBe("completed");
+    expect(capsule.error).toBeUndefined();
+    const events = (await kernel.store.readTrace(capsule.scopeId)).filter((event) =>
+      event.type === "pi.tool_execution_end" && (event.data as any).toolName === "bash");
+    expect(events).toHaveLength(2);
+    const outputs = [];
+    for (const event of events) {
+      const { details } = (event.data as any).result;
+      expect(details.exitCode).toBe(0);
+      expect(details.error).toBeUndefined();
+      outputs.push(await kernel.store.readEvidenceBlob(capsule.scopeId, details.blobRef));
+    }
+    expect(outputs).toEqual(["FIRST", "FIRSTSECOND"]);
+    expect(await readFile(path.join(cwd, "evidence.txt"), "utf8")).toBe("fixture evidence\n");
+    const scope = kernel.scopes.get(capsule.scopeId)!;
+    expect(scope.runtime.state).toBe("disposed");
+    expect((await exec("docker", ["ps", "-aq", "--filter", `name=^/${scope.runtime.containerName}$`])).stdout.trim()).toBe("");
   }, 90_000);
 
   it("denies host-backed tools even if the model attempts to call one", async () => {
@@ -290,6 +322,182 @@ describe.skipIf(!dockerImage)("isolated delegation through real Pi and Docker", 
     expect(result.status).toBe("failed");
     expect(result.error).toContain("clean committed");
     expect(requests).toHaveLength(0);
+  }, 90_000);
+
+  async function verifyPatchInDocker(cwd: string, patchText: string): Promise<void> {
+    const archive = (await exec("tar", ["--exclude=.git", "-cf", "-", "-C", cwd, "."], {
+      encoding: "buffer",
+      env: { ...process.env, TAR_OPTIONS: "", COPYFILE_DISABLE: "1" },
+    })).stdout;
+    const patchB64 = Buffer.from(patchText).toString("base64");
+    await new Promise<void>((resolve, reject) => {
+      const child = execFile("docker", [
+        "run", "--rm", "-i", "--network=none", dockerImage!,
+        "sh", "-c",
+        `set -e
+mkdir /repo && cd /repo
+tar -xf - --no-same-owner --no-same-permissions --no-overwrite-dir
+git init -q
+git config user.name Fixture
+git config user.email fixture@example.invalid
+git add .
+git commit -qm init
+printf "%s" "${patchB64}" | base64 -d > /tmp/change.patch
+git apply --check /tmp/change.patch
+git apply /tmp/change.patch
+test "$(cat evidence.txt)" = 'modified content'
+test -x evidence.txt
+test "$(cat added.txt)" = 'brand new'
+test -f empty.txt && test ! -s empty.txt
+test ! -e AGENTS.md
+`,
+      ], (err) => err ? reject(err) : resolve());
+      child.stdin?.end(archive);
+    });
+  }
+
+  it("captures complete workspace patch for added, edited, deleted files and mode changes", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "printf 'brand new\\n' > added.txt; printf 'modified content\\n' > evidence.txt; rm AGENTS.md; chmod 755 evidence.txt; touch empty.txt";
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Make workspace changes", parent: parent() });
+    expect(capsule.status).toBe("completed");
+    expect(capsule.sourceRevision).toBeDefined();
+    expect(capsule.patch).toMatchObject({
+      status: "captured",
+      sourceRevision: capsule.sourceRevision,
+    });
+    expect(capsule.patch?.blobRef).toMatch(/^blob:\/\//);
+    const patchText = await kernel.store.readEvidenceBlob(capsule.scopeId, capsule.patch!.blobRef!);
+    expect(patchText).toBeDefined();
+    expect(patchText).toContain("diff --git a/added.txt b/added.txt");
+    expect(patchText).toContain("new file mode 100644");
+    expect(patchText).toContain("+brand new");
+    expect(patchText).toContain("diff --git a/evidence.txt b/evidence.txt");
+    expect(patchText).toContain("old mode 100644");
+    expect(patchText).toContain("new mode 100755");
+    expect(patchText).toContain("+modified content");
+    expect(patchText).toContain("diff --git a/AGENTS.md b/AGENTS.md");
+    expect(patchText).toContain("deleted file mode 100644");
+    await verifyPatchInDocker(cwd, patchText!);
+    expect(await readFile(path.join(cwd, "evidence.txt"), "utf8")).toBe("fixture evidence\n");
+    expect(await readFile(path.join(cwd, "AGENTS.md"), "utf8")).toBe("SNAPSHOT_GUIDANCE");
+    const scope = kernel.scopes.get(capsule.scopeId)!;
+    expect(scope.runtime.state).toBe("disposed");
+    expect((await exec("docker", ["ps", "-aq", "--filter", `name=^/${scope.runtime.containerName}$`])).stdout.trim()).toBe("");
+  }, 90_000);
+
+  it("fails explicitly when retaining the patch fails and still disposes the runtime", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "printf changed > evidence.txt";
+    const kernel = await createKernel(cwd);
+    const save = kernel.store.saveEvidenceBlob.bind(kernel.store);
+    vi.spyOn(kernel.store, "saveEvidenceBlob").mockImplementation((scopeId, data) => {
+      if (data.toString().startsWith("diff --git")) return Promise.reject(new Error("fixture storage full"));
+      return save(scopeId, data);
+    });
+    const capsule = await kernel.fork({ goal: "Change a file", parent: parent() });
+    expect(capsule.status).toBe("failed");
+    expect(capsule.patch).toMatchObject({ status: "error", error: "fixture storage full" });
+    expect(kernel.scopes.get(capsule.scopeId)!.runtime.state).toBe("disposed");
+  }, 90_000);
+
+  it("explicitly reports no-change when guest workspace files are not modified", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "cat evidence.txt; true";
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Read only", parent: parent() });
+    expect(capsule.status).toBe("completed");
+    expect(capsule.patch).toMatchObject({
+      status: "no-change",
+      sourceRevision: capsule.sourceRevision,
+    });
+    expect(capsule.patch?.blobRef).toBeUndefined();
+    const scope = kernel.scopes.get(capsule.scopeId)!;
+    expect(scope.runtime.state).toBe("disposed");
+    expect((await exec("docker", ["ps", "-aq", "--filter", `name=^/${scope.runtime.containerName}$`])).stdout.trim()).toBe("");
+  }, 90_000);
+
+  it("permits durable read and inspect of the captured patch after container cleanup", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "printf 'added for read\\n' > durable.txt";
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Add durable file", parent: parent() });
+    expect(capsule.status).toBe("completed");
+    expect(capsule.patch?.status).toBe("captured");
+    const scope = kernel.scopes.get(capsule.scopeId)!;
+    expect(scope.runtime.state).toBe("disposed");
+    expect((await exec("docker", ["ps", "-aq", "--filter", `name=^/${scope.runtime.containerName}$`])).stdout.trim()).toBe("");
+
+    const inspectText = await readEvidence(kernel.store, capsule.scopeId);
+    expect(inspectText).toContain("workspace.patch");
+    const match = inspectText.match(/(\d+)\.\s+workspace\.patch/);
+    expect(match).not.toBeNull();
+    const itemNum = Number(match![1]);
+
+    const itemText = await readEvidence(kernel.store, capsule.scopeId, itemNum);
+    expect(itemText).toContain("durable.txt");
+    expect(itemText).toContain("+added for read");
+  }, 90_000);
+
+  it("rejects unsafe guest exports including symlinks and .git, ensuring container cleanup", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "ln -s /etc/passwd evil_link";
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Symlink attempt", parent: parent() });
+    expect(capsule.status).toBe("failed");
+    expect(capsule.patch?.status).toBe("error");
+    expect(capsule.patch?.error).toMatch(/symlink|unsafe/i);
+    const scope = kernel.scopes.get(capsule.scopeId)!;
+    expect(scope.runtime.state).toBe("disposed");
+    expect((await exec("docker", ["ps", "-aq", "--filter", `name=^/${scope.runtime.containerName}$`])).stdout.trim()).toBe("");
+  }, 90_000);
+
+  it("rejects oversized/malformed export with explicit error and verifies container cleanup", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "python3 -c \"open('large.txt', 'wb').write(b'x' * (13 * 1024 * 1024))\"";
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Oversized attempt", parent: parent() });
+    expect(capsule.status).toBe("failed");
+    expect(capsule.patch?.status).toBe("error");
+    expect(capsule.patch?.error).toMatch(/limit|oversized|bytes|binary/i);
+    const scope = kernel.scopes.get(capsule.scopeId)!;
+    expect(scope.runtime.state).toBe("disposed");
+    expect((await exec("docker", ["ps", "-aq", "--filter", `name=^/${scope.runtime.containerName}$`])).stdout.trim()).toBe("");
+  }, 90_000);
+
+  it("rejects a patch over the retention cap rather than silently truncating it", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "head -c 5000000 /dev/zero | tr '\\0' x > added.txt";
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Large patch", parent: parent() });
+    expect(capsule.status).toBe("failed");
+    expect(capsule.patch?.status).toBe("error");
+    expect(capsule.patch?.error).toMatch(/patch limit exceeded/);
+    expect(capsule.patch?.blobRef).toBeUndefined();
+    expect(kernel.scopes.get(capsule.scopeId)!.runtime.state).toBe("disposed");
+  }, 90_000);
+
+  it("reports patch capture unavailable on cancellation while preserving cleanup semantics", async () => {
+    const cwd = await committedWorkspace();
+    dockerCommand = "echo running; sleep 300";
+    const kernel = await createKernel(cwd);
+    const controller = new AbortController();
+    const capsule = await kernel.fork({
+      goal: "Cancel me",
+      parent: parent(),
+      signal: controller.signal,
+      onActivity: (_s, label) => { if (label === "tool_execution_update") controller.abort(); },
+    });
+    expect(capsule.status).toBe("cancelled");
+    expect(capsule.patch?.status).toBe("unavailable");
+    const evidence = await readEvidence(kernel.store, capsule.scopeId);
+    const item = Number(evidence.match(/(\d+)\. workspace\.patch/)?.[1]);
+    expect(item).toBeGreaterThan(0);
+    expect(await readEvidence(kernel.store, capsule.scopeId, item)).toContain("Patch capture unavailable");
+    const scope = kernel.scopes.get(capsule.scopeId)!;
+    expect(scope.runtime.state).toBe("disposed");
+    expect((await exec("docker", ["ps", "-aq", "--filter", `name=^/${scope.runtime.containerName}$`])).stdout.trim()).toBe("");
   }, 90_000);
 });
 

@@ -32,9 +32,19 @@ Use a trusted local Linux image with Bash, GNU tar and standard Unix utilities, 
 
 ## Install from a checkout
 
+This is a private experimental package, not an npm registry release. Use Node 22.19+ or Node 24 and Pi **0.85.1**; other Pi versions have not been verified. Review the source first: the extension itself runs on the host with full access, even when child commands use Docker.
+
 ```bash
+cd /absolute/path/to/pi-scopes
+npm ci
 pi install /absolute/path/to/pi-scopes
 ```
+
+Local installation registers that directory; it does not copy it or install its dependencies. Keep the directory in place. Restart Pi after installation, then run `/scope tree` to confirm the extension is loaded without starting a child. To remove it: `pi remove /absolute/path/to/pi-scopes`.
+
+**Before the first delegation:** choose the execution environment below. With no configuration, children can edit your real working directory. `context: "fresh"` does not mean sandboxed; fresh/fork controls conversation context, not filesystem authority.
+
+For a first task, ask the parent to delegate one concrete investigation with a small scope and return evidence. In Docker mode, review the captured patch and recorded tests before separately applying anything; in host mode, edits already affect the shared checkout. A completed result is not an independent correctness guarantee.
 
 ### Optional isolated execution
 
@@ -46,7 +56,11 @@ export PI_SCOPES_DOCKER_IMAGE="$(docker image inspect --format '{{.Id}}' YOUR_PR
 pi
 ```
 
-The child gets a copy under `/workspace`, with Bash as its only work tool. It can edit that copy, but **your checkout is not changed**. Network is off; dependencies must already be in the image. Captured command output and the result capsule survive cleanup; guest files do not. Return needed diffs as command output—nothing is automatically merged or exported.
+The child gets a copy under `/workspace`, with Bash as its only work tool. It can edit that copy, but **your checkout is not changed**. Network is off; dependencies must already be in the image. Captured command output, the result capsule, and an automatically captured workspace text patch survive cleanup; guest files do not. The child need not back up files or print a diff. Use `scope inspect/read` to retrieve the patch. Nothing is automatically applied or merged.
+
+Patch capture covers added/modified/deleted UTF-8 regular files and executable-bit changes, against the imported source revision. Capture errors fail the scope explicitly; cancellation can leave capture unavailable. Limits: 12 MiB / 10,000 regular files exported, 20 MiB archive transport, 4 MiB retained patch, 200,000 combined old/new lines per changed file. Only portable ASCII paths (letters, digits, `_`, `.`, `/`, `-`) and ustar-representable names are currently supported. Symlinks, special files, `.git`, unsafe paths, and changed binary/non-UTF-8 files are refused, not silently omitted. New files ignored by the original checkout's Git ignore rules are excluded; tracked changes are never ignored. Global ignore files are disabled. Keep temporary work in `/tmp`.
+
+This is bounded artifact handoff, not forensic proof: guest background processes can race capture, and compromised guest tools can lie. A captured patch still needs review and verification before application.
 
 This version refuses dirty or non-ignored untracked work, symlinks, submodules and snapshots above 12 MiB / 10,000 regular files. Ignored files and `.git` are excluded. Committed secrets and inherited conversation text are **not redacted**. Missing Docker, invalid configuration or failed setup never silently falls back to host execution.
 

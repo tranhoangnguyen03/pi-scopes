@@ -58,6 +58,21 @@ export interface ResultCapsuleInput {
   confidence?: number;
 }
 
+export interface PatchStats {
+  files: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface PatchSummary {
+  status: "captured" | "no-change" | "unavailable" | "error";
+  blobRef?: string;
+  sourceRevision?: string;
+  files?: string[];
+  stats?: PatchStats;
+  error?: string;
+}
+
 export interface ResultCapsule extends ResultCapsuleInput {
   status: Exclude<ScopeStatus, "active">;
   scopeId: ScopeId;
@@ -68,6 +83,7 @@ export interface ResultCapsule extends ResultCapsuleInput {
   fallbackReason?: string;
   error?: string;
   usage?: ChildUsage;
+  patch?: PatchSummary;
 }
 
 export interface TraceEvent {
@@ -91,4 +107,5 @@ export interface ChildExecutionResult {
   finalText?: string;
   error?: string;
   usage: ChildUsage;
+  patch?: PatchSummary;
 }

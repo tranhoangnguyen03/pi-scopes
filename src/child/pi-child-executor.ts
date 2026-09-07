@@ -21,6 +21,7 @@ import type { ParentSnapshot } from "./context.js";
 import { projectGuidance } from "./project-guidance.js";
 import { DockerRuntime } from "../runtime/docker.js";
 import { snapshotProject } from "../runtime/project-snapshot.js";
+import { captureWorkspacePatch } from "../runtime/workspace-patch.js";
 import { dockerBash } from "./docker-bash.js";
 
 export interface ChildRunRequest {
@@ -72,7 +73,7 @@ function childInstructions(scope: ScopeRecord, mapping?: { cwd: string; sourceRo
       ? "Workspace mode: docker-copy. All work runs in a disposable committed project copy under /workspace; no host mounts, network or automatic promotion. Only Bash and scope_return exist. Host paths in inherited text are not accessible: use the guest cwd. Read/search/edit using shell commands, not unavailable host tools."
       : `Workspace mode: ${scope.workspaceMode}. The workspace is shared with the parent and is not a security boundary.`,
     scope.workspaceMode === "docker-copy"
-      ? "Use /tmp for temporary files. Guest files disappear at scope end. Preserve needed findings/diffs as command output for retained evidence; do not promise durable guest artifact paths. Dependencies must already be available; missing tools or dependencies require a partial result, not network installation or host fallback."
+      ? "Use /tmp for temporary files. Guest files disappear at scope end. The harness automatically captures a bounded text patch before cleanup; no backups or manual diff printing are needed. Capture may fail for unsupported files/paths or size limits, reported explicitly to the parent. Preserve other findings as command output; do not promise durable guest artifact paths. Dependencies must already be available; missing tools or dependencies require a partial result, not network installation or host fallback."
       : `Use ${scope.runtime.scratchPath ?? "the assigned scratch directory"} for temporary scripts, downloads, and logs.`,
     "Investigate only the assigned goal. Preserve concrete evidence such as paths, symbols, commands, and test results.",
     scope.context === "fork"
@@ -106,7 +107,8 @@ export class PiChildExecutor implements ChildExecutor {
       const guidance = !request.snapshot && request.repoInstructions !== false
         ? (await projectGuidance(copiedCwd, inputRoot)).map((file) => ({ ...file, path: path.posix.join("/workspace", ...path.relative(inputRoot, file.path).split(path.sep)) })) : [];
       request.scope.runtime.sourceRevision = snapshot.commit;
-      await this.store.appendTrace(request.scope.id, "scope.workspace", snapshot);
+      const { manifest: _manifest, ...workspaceInfo } = snapshot;
+      await this.store.appendTrace(request.scope.id, "scope.workspace", workspaceInfo);
       request.signal.throwIfAborted();
       runtime = await DockerRuntime.create(request.scope.runtime.image, async (name) => {
         request.scope.runtime.containerName = name;
@@ -119,8 +121,60 @@ export class PiChildExecutor implements ChildExecutor {
       result = await this.runSession(request, { cwd: snapshot.cwd, sourceRoot: snapshot.root, guidance,
         bash: dockerBash(runtime, snapshot.cwd, this.store, request.scope.id, (error) => { commandFailure = error; }) });
       if (commandFailure && !request.signal.aborted) result = { ...result, status: "failed", error: commandFailure };
+      if (!request.signal.aborted && runtime) {
+        try {
+          const patch = await captureWorkspacePatch({
+            runtime,
+            repoRoot: snapshot.root,
+            inputDir: input,
+            sourceRevision: snapshot.commit,
+            manifest: snapshot.manifest,
+            signal: request.signal,
+          });
+          if (patch.status === "captured") {
+            const blobRef = await this.store.saveEvidenceBlob(request.scope.id, Buffer.from(patch.patchText, "utf8"));
+            result.patch = {
+              status: "captured",
+              blobRef,
+              sourceRevision: snapshot.commit,
+              files: patch.files.slice(0, 20),
+              stats: patch.stats,
+            };
+            await this.store.appendTrace(request.scope.id, "scope.patch", result.patch);
+          } else {
+            result.patch = {
+              status: "no-change",
+              sourceRevision: snapshot.commit,
+            };
+            await this.store.appendTrace(request.scope.id, "scope.patch", result.patch);
+          }
+        } catch (patchError) {
+          const message = patchError instanceof Error ? patchError.message : String(patchError);
+          result.status = request.signal.aborted ? "cancelled" : "failed";
+          result.error = [result.error, `Workspace patch capture failed: ${message}`].filter(Boolean).join("; ");
+          result.patch = {
+            status: request.signal.aborted ? "unavailable" : "error",
+            error: message,
+            sourceRevision: snapshot.commit,
+          };
+          await this.store.appendTrace(request.scope.id, "scope.patch", result.patch);
+        }
+      } else if (request.signal.aborted) {
+        result.patch = {
+          status: "unavailable",
+          error: "Runtime was cancelled before patch capture.",
+          sourceRevision: snapshot.commit,
+        };
+      }
     } catch (error) {
       result = { ...result, status: request.signal.aborted ? "cancelled" : "failed", error: error instanceof Error ? error.message : String(error) };
+      if (!result.patch && request.scope.workspaceMode === "docker-copy") {
+        result.patch = {
+          status: "unavailable",
+          error: request.signal.aborted ? "Runtime was cancelled before patch capture." : (error instanceof Error ? error.message : String(error)),
+          ...(request.scope.runtime.sourceRevision ? { sourceRevision: request.scope.runtime.sourceRevision } : {}),
+        };
+      }
     } finally {
       if (request.scope.runtime.containerName) {
         try {

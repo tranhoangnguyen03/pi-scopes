@@ -105,7 +105,17 @@ export class ScopeKernel {
           : execution.status !== "completed" && execution.status !== "partial"
             ? { fallbackReason: capsuleInput.unresolved?.[0] ?? "Structured return unavailable." } : {}),
         ...(execution.error ? { error: execution.error } : {}),
+        ...(execution.patch ? { patch: execution.patch } : {}),
       };
+
+      if (execution.patch?.status === "captured" && execution.patch.blobRef) {
+        const patchArtifact = { label: "Workspace patch", ref: execution.patch.blobRef };
+        const artifacts = capsule.artifacts ? [...capsule.artifacts] : [];
+        if (!artifacts.some((a) => a.ref === execution.patch!.blobRef)) {
+          artifacts.push(patchArtifact);
+        }
+        capsule.artifacts = artifacts;
+      }
 
       await this.store.appendTrace(scope.id, "scope.return", { capsule, usage: execution.usage });
       const resultRef = await this.store.saveResult(capsule);
@@ -125,6 +135,13 @@ export class ScopeKernel {
         traceRef: this.store.traceRef(scope.id),
         fallbackReason: message,
         error: message,
+        ...(workspaceMode === "docker-copy" ? {
+          patch: {
+            status: "unavailable",
+            error: controller.signal.aborted ? "Runtime was cancelled before patch capture." : message,
+            ...(scope.runtime.sourceRevision ? { sourceRevision: scope.runtime.sourceRevision } : {}),
+          },
+        } : {}),
       };
       await this.store.appendTrace(scope.id, `scope.${status}`, { error: message });
       const resultRef = await this.store.saveResult(capsule);

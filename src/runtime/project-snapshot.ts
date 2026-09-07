@@ -15,7 +15,21 @@ function git(cwd: string, args: string[], signal: AbortSignal, input?: string): 
   });
 }
 
-export async function snapshotProject(cwd: string, destination: string, signal: AbortSignal): Promise<{ root: string; commit: string; cwd: string; files: number; bytes: number }> {
+export interface SnapshotFileMeta {
+  mode: "100644" | "100755";
+  bytes: number;
+}
+
+export interface SnapshotResult {
+  root: string;
+  commit: string;
+  cwd: string;
+  files: number;
+  bytes: number;
+  manifest: Map<string, SnapshotFileMeta>;
+}
+
+export async function snapshotProject(cwd: string, destination: string, signal: AbortSignal): Promise<SnapshotResult> {
   const start = await realpath(cwd);
   const root = await realpath((await git(start, ["rev-parse", "--show-toplevel"], signal)).toString().trim());
   const relative = path.relative(root, start);
@@ -83,5 +97,9 @@ export async function snapshotProject(cwd: string, destination: string, signal: 
     offset += file.bytes + 1;
   }
   await mkdir(path.join(destination, relative), { recursive: true, mode: 0o700 });
-  return { root, commit, cwd: path.posix.join("/workspace", ...relative.split(path.sep)), files: files.length, bytes };
+  const manifest = new Map<string, SnapshotFileMeta>();
+  for (const file of files) {
+    manifest.set(file.name, { mode: file.mode as "100644" | "100755", bytes: file.bytes });
+  }
+  return { root, commit, cwd: path.posix.join("/workspace", ...relative.split(path.sep)), files: files.length, bytes, manifest };
 }

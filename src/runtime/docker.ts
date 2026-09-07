@@ -88,6 +88,27 @@ export class DockerRuntime implements BashOperations {
     } finally { this.running = false; }
   }
 
+  async exportWorkspace(signal?: AbortSignal): Promise<Buffer> {
+    signal?.throwIfAborted();
+    if (this.closed || this.running) throw new Error("Docker export requires an idle open runtime");
+    this.running = true;
+    try {
+      signal?.throwIfAborted();
+      const pending = execFileAsync("docker", ["exec", "--workdir=/workspace", this.name, "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "tar", "--format=ustar", "-cf", "-", "-C", "/workspace", "."], {
+        encoding: "buffer",
+        maxBuffer: 20 * 1024 * 1024,
+        timeout: 15_000,
+        killSignal: "SIGKILL",
+        ...(signal ? { signal } : {}),
+      });
+      const result = await pending;
+      signal?.throwIfAborted();
+      return result.stdout;
+    } finally {
+      this.running = false;
+    }
+  }
+
   async exec(command: string, cwd: string, options: Parameters<BashOperations["exec"]>[2]): Promise<{ exitCode: number | null }> {
     if (this.closed) throw new Error(`Docker runtime disposed or cleanup pending: ${this.name}`);
     if (this.running) throw new Error("One command at a time per Docker runtime");
