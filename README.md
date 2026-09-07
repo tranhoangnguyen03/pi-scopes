@@ -22,6 +22,14 @@ npm test
 
 The tests include real Pi parent/child sessions against a local scripted HTTP provider: no model credentials or paid inference are required. These check integration, not model effectiveness. The [first paired SWE-bench pilot](evals/results/2026-09-05-terra-high-pilot.md) resolved the task in both arms: scopes reduced final parent context but increased time and estimated cost.
 
+An internal Docker command-runner spike has opt-in real-runtime checks. It is **not connected to `scope run`**, which still executes on the host. Tests require a trusted, already-installed Linux image containing Bash and standard Unix utilities, with no declared volumes:
+
+```bash
+PI_SCOPES_TEST_DOCKER_IMAGE=sha256:<full-local-image-id> npm test -- test/docker-runtime.test.ts
+```
+
+No image is pulled or built. Without this variable, real-Docker cases are explicitly skipped; the regular suite remains Docker-independent. See the [runner plan and limits](docs/plans/2026-09-07-docker-command-runner.md).
+
 ## Install from a checkout
 
 ```bash

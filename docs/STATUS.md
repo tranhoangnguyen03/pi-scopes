@@ -49,13 +49,23 @@ Current API: `scope({ action: "run", context: "fresh" | "fork", goal })`, with f
 
 ## Next priorities
 
-1. **Sandbox design:** the [boundary proposal](plans/2026-09-07-sandbox-boundary-proposal.md) recommends host inference with all child work routed through containerized Bash, no host-backed file tools, and no automatic promotion. The owner approved Docker as the first backend; implementation begins with an internal command-runner spike, not a public isolation claim. Keep context choice independent of execution authority. Worktrees and reviewed patch promotion cannot replace isolation.
+1. **Sandbox design:** the [boundary proposal](plans/2026-09-07-sandbox-boundary-proposal.md) recommends host inference with all child work routed through containerized Bash, no host-backed file tools, and no automatic promotion. The owner approved Docker as the first backend; an internal command-runner spike is implemented and locally tested, but not connected to scope execution or a public isolation claim. Keep context choice independent of execution authority. Worktrees and reviewed patch promotion cannot replace isolation.
 2. **Release readiness:** consolidated compatibility/security review and installation checks before making a public package recommendation.
 3. **Targeted effectiveness:** only test a remaining claim, such as long-history handoff quality, rather than replay successful demos. Guidance is not an access-control mechanism.
 
 ## Post-checkpoint real-task observation
 
 The owner authorized `deepseek/deepseek-v4-flash` for one retry after GLM refused the initial request on quota grounds. The [sandbox-design observation](../evals/results/2026-09-07-deepseek-sandbox-design.md) completed three phases for approximately **$0.01143**, **83.0% cached input**. The first follow-up used retained evidence without reopening source; the second needed no tools. Initial source rereading still occurred, and driver review corrected material mistakes in the conclusions. The child also reported complete after acknowledging uninspected sources at the investigation limit. This demonstrates usable retrieval, not independently verified conclusions, comparative savings or an implemented sandbox. The proposal and report are post-checkpoint work; runtime source remains at the checkpoint.
+
+## Docker command-runner spike — 2026-09-07
+
+`src/runtime/docker.ts` implements an internal `BashOperations`-compatible runner with one disposable container, pinned local image identity, no host mounts/env forwarding/network, non-root read-only root plus limited writable tmpfs, bounded command output, and whole-container removal on abort/timeout/overflow. It refuses new commands after disposal starts, even if cleanup fails; an explicit disposal retry remains possible. No host fallback.
+
+Fresh verification: **67 tests passed** with the Docker cases enabled, plus TypeScript and diff checks. The runner contributes 13 cases (two Docker-independent, eleven real-runtime); default tests skip the eleven unless an image is explicitly selected. Tested on macOS with Docker Desktop **29.4.0**, Linux/aarch64 daemon, existing Linux/amd64 image `sha256:caf3ef82cd1d4ebd1724ed8374c8b2d8f1396bfab80c024489006d6093b19ad3` under emulation. No image pull/build or paid inference. No labelled test containers remained afterward. This is not native-Linux validation.
+
+Static AGY review prompted failing regression checks for synchronous command-setup errors, external disposal reporting, cleanup retry state and pre-aborted cleanup failures; these were fixed and rerun in the primary checkout. The reviewer did not run tests. See the [implementation record](plans/2026-09-07-docker-command-runner.md) for precise limits.
+
+**Not activated:** `scope run` still uses the original host tools. The adapter does not yet import repository files, own the SDK's overflow files, connect scope-wide lifetime/cancellation, reconcile crashes, select execution policy, export artifacts or promote patches. Network enforcement was inspected in Docker configuration, not tested against controlled endpoints; runtime PID/memory/CPU limits likewise need adversarial stress coverage beyond the tested tmpfs/output caps. Do not call this a finished sandbox.
 
 ## Deliberate limits
 
