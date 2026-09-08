@@ -1,6 +1,8 @@
 # Experimental checkpoint — 2026-09-07
 
-**Milestone: usable opt-in Docker delegation, with fresh/fork context and retained evidence.** Package remains private `0.1.0-experimental.0`; this is not a registry release or security certification.
+**Implemented milestone: usable opt-in Docker delegation, with fresh/fork context and retained evidence.** Package remains private `0.1.0-experimental.0`; this is not a registry release or security certification.
+
+**Active destination:** an npm-installable package for ordinary main-agent conversation in the owner's VM, with useful work, slower distracting context buildup, and actionable extension compatibility information. [Documentation map/archive](README.md) · [Product design](product-release-design.md) · [Active release plan](plans/2026-09-07-npm-vm-release.md). Planned compatibility diagnostics and hands-off workflow improvements are not shipped capabilities.
 
 ## What works now
 
@@ -69,9 +71,9 @@ Owner policy remains output quality versus best-effort combined dollars, with un
 
 ## Next meaningful work
 
-1. Review/checkpoint and clean-install registration are complete locally. Use this baseline on ordinary work, collecting concrete blockers before selecting more development. No publication or push implied.
-2. Use the experimental package on actual work; prioritize recurring blockers rather than optimizing one selected run. Avoid automatic promotion until its separate trust boundary is designed/tested.
-3. Before public recommendation: native-Linux/macOS compatibility, adversarial runtime review and clear unattended-use limits.
+1. Execute Stage 1 of the active release plan: supported Pi compatibility observations, target VM and owner-selected extensions, then authority/default decisions. No speculative universal conflict detection.
+2. Add actionable diagnostics and validate ordinary main-agent task completion, including the gap between a retained Docker patch and an applied result. Preserve existing authority boundaries.
+3. Test the exact candidate in the target VM, obtain separate publication approval, and verify registry installation. Use real work to choose fixes; compact-diff optimization stays deferred.
 
 ## Deferred optimization: compact patches
 

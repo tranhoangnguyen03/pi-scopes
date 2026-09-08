@@ -1,6 +1,6 @@
 # pi-scopes
 
-Current milestone: [opt-in isolated delegation + fresh/fork context + retained evidence](docs/STATUS.md).
+Current milestone: [opt-in isolated delegation + fresh/fork context + retained evidence](docs/STATUS.md). Next destination: [an npm-installable, main-agent-first VM experience](docs/product-release-design.md). [Documentation map and historical archive](docs/README.md).
 
 `pi-scopes` is an experimental Pi extension for bounded child work. It lets the parent agent send noisy investigation into a separate context, retain the full trace, and receive a compact result capsule.
 
