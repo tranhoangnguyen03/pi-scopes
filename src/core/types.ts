@@ -1,11 +1,33 @@
+import type { Usage } from "@earendil-works/pi-ai";
+
 export const SCOPE_SCHEMA_VERSION = 1 as const;
 
 export type ScopeId = string;
+export type ContextMode = "fresh" | "fork";
 export type ScopeStatus = "active" | "completed" | "partial" | "failed" | "cancelled";
-export type RuntimeState = "active" | "disposed";
+export type RuntimeState = "active" | "disposed" | "cleanup-failed";
+export type WorkspaceMode = "host-shared" | "docker-copy";
 
 export interface ScopeBudget {
   timeoutMs: number;
+  maxTurns?: number;
+}
+
+export interface DockerPolicy {
+  network: "none" | "bridge";
+  memory: string;
+  cpus: number;
+  pidsLimit: number;
+  workspaceSize: string;
+  tmpSize: string;
+  warning?: string;
+}
+
+export interface GuestCapabilities {
+  tools: Record<string, string>;
+  missing: string[];
+  network: "none" | "bridge";
+  summary: string;
 }
 
 export interface ScopeRecord {
@@ -14,13 +36,19 @@ export interface ScopeRecord {
   parentId: ScopeId | null;
   kind: "root" | "subsession";
   goal: string;
+  context?: ContextMode;
   status: ScopeStatus;
-  workspaceMode: "host-shared";
+  workspaceMode: WorkspaceMode;
   cwd: string;
   budget: ScopeBudget;
   runtime: {
     state: RuntimeState;
     scratchPath?: string;
+    image?: string;
+    containerName?: string;
+    sourceRevision?: string;
+    dockerPolicy?: DockerPolicy;
+    capabilities?: GuestCapabilities;
   };
   traceRef: string;
   resultRef?: string;
@@ -49,12 +77,34 @@ export interface ResultCapsuleInput {
   confidence?: number;
 }
 
+export interface PatchStats {
+  files: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface PatchSummary {
+  status: "captured" | "no-change" | "unavailable" | "error";
+  blobRef?: string;
+  sourceRevision?: string;
+  files?: string[];
+  stats?: PatchStats;
+  error?: string;
+}
+
 export interface ResultCapsule extends ResultCapsuleInput {
   status: Exclude<ScopeStatus, "active">;
   scopeId: ScopeId;
+  context?: ContextMode;
+  workspaceMode?: WorkspaceMode;
+  sourceRevision?: string;
   traceRef: string;
   fallbackReason?: string;
   error?: string;
+  usage?: ChildUsage;
+  patch?: PatchSummary;
+  dockerPolicy?: DockerPolicy;
+  capabilities?: GuestCapabilities;
 }
 
 export interface TraceEvent {
@@ -67,19 +117,18 @@ export interface TraceEvent {
   data: unknown;
 }
 
-export interface ChildUsage {
+export interface ChildUsage extends Usage {
   turns: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  cost: number;
 }
 
 export interface ChildExecutionResult {
   status: "completed" | "partial" | "failed" | "cancelled";
   capsuleInput?: ResultCapsuleInput;
+  fallbackReason?: string;
   finalText?: string;
   error?: string;
   usage: ChildUsage;
+  patch?: PatchSummary;
+  dockerPolicy?: DockerPolicy;
+  capabilities?: GuestCapabilities;
 }

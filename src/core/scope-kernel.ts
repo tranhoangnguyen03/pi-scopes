@@ -1,15 +1,21 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { dockerPolicy } from "../runtime/docker-policy.js";
 import { fallbackCapsuleInput } from "./capsule.js";
 import type { ChildExecutor } from "../child/pi-child-executor.js";
-import type { ResultCapsule, ScopeRecord } from "./types.js";
+import type { ContextMode, ResultCapsule, ScopeRecord } from "./types.js";
+import type { ParentSnapshot } from "../child/context.js";
 import { acquireScratch, type ScratchLease } from "../runtime/scratch.js";
 import { ScopeManager } from "./scope-manager.js";
 import type { ScopeStore } from "../storage/scope-store.js";
 
 export interface ForkOptions {
   goal: string;
+  context?: ContextMode;
+  snapshot?: ParentSnapshot;
+  repoInstructions?: boolean;
   timeoutMs?: number;
+  maxTurns?: number;
   parent: Pick<ExtensionContext, "model" | "thinkingLevel">;
   signal?: AbortSignal;
   onActivity?: (scope: ScopeRecord, label: string) => void;
@@ -35,7 +41,23 @@ export class ScopeKernel {
     const goal = options.goal.trim();
     if (!goal) throw new Error("A child goal is required");
     if (this.activeAbort) throw new Error("v0.1 permits only one active child");
+    if (this.scopes.list().some((scope) => scope.runtime.state === "cleanup-failed")) throw new Error("Docker cleanup is unverified. Restore Docker and reload this session to reconcile before launching more work.");
+    const execution = process.env.PI_SCOPES_EXECUTION ?? "host";
+    if (execution !== "host" && execution !== "docker") throw new Error("PI_SCOPES_EXECUTION must be host or docker; no fallback was used.");
+    const image = execution === "docker" ? process.env.PI_SCOPES_DOCKER_IMAGE : undefined;
+    if (execution === "docker" && (!image || !/^sha256:[a-f0-9]{64}$/.test(image))) throw new Error("Docker mode requires PI_SCOPES_DOCKER_IMAGE set to a complete local sha256: image ID; no mutable tags or automatic pulls.");
+    const workspaceMode = execution === "docker" ? "docker-copy" : "host-shared";
+    const policy = execution === "docker" ? dockerPolicy() : undefined;
 
+    const context = options.context ?? "fresh";
+    if (context !== "fresh" && context !== "fork") throw new Error("context must be fresh or fork");
+    if (context === "fork" && !options.snapshot) throw new Error("Fork context requires a parent snapshot");
+    if (context === "fresh" && options.snapshot) throw new Error("Fresh context cannot contain a parent snapshot");
+    if (context === "fork" && options.repoInstructions !== undefined) throw new Error("repoInstructions applies to fresh context only; fork reuses inherited guidance");
+    const maxTurns = options.maxTurns ?? 8;
+    if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 50) {
+      throw new Error("maxTurns must be an integer between 1 and 50");
+    }
     const timeoutMs = options.timeoutMs ?? 15 * 60_000;
     const scopeId = `sc_${randomUUID().replaceAll("-", "").slice(0, 10)}`;
     let scratch: ScratchLease | undefined;
@@ -45,21 +67,31 @@ export class ScopeKernel {
 
     const parentAbort = () => controller.abort(options.signal?.reason);
     options.signal?.addEventListener("abort", parentAbort, { once: true });
+    if (options.signal?.aborted) parentAbort();
     const timeout = setTimeout(() => controller.abort(new Error(`Scope exceeded ${timeoutMs}ms timeout`)), timeoutMs);
 
     try {
       const scratchPath = this.store.scratchPath(scopeId);
       scratch = await acquireScratch(scratchPath);
-      scope = await this.scopes.createChild(scopeId, goal, timeoutMs, scratchPath);
+      scope = await this.scopes.createChild(scopeId, goal, timeoutMs, scratchPath, maxTurns, context, workspaceMode, image);
+      if (policy) {
+        scope.runtime.dockerPolicy = policy;
+        await this.store.saveScope(scope);
+      }
       await this.store.appendTrace(scope.id, "scope.fork", {
         parentId: scope.parentId,
         goal: scope.goal,
+        context,
         workspaceMode: scope.workspaceMode,
         timeoutMs,
+        maxTurns,
       });
 
+      controller.signal.throwIfAborted();
       const execution = await this.childExecutor.run({
         scope,
+        ...(options.snapshot ? { snapshot: options.snapshot } : {}),
+        ...(options.repoInstructions !== undefined ? { repoInstructions: options.repoInstructions } : {}),
         parent: options.parent,
         signal: controller.signal,
         ...(options.onActivity ? { onActivity: (label) => options.onActivity?.(scope as ScopeRecord, label) } : {}),
@@ -69,11 +101,29 @@ export class ScopeKernel {
       const capsule: ResultCapsule = {
         ...capsuleInput,
         status: execution.status,
+        context,
+        workspaceMode,
         scopeId: scope.id,
+        ...(scope.runtime.sourceRevision ? { sourceRevision: scope.runtime.sourceRevision } : {}),
         traceRef,
-        ...(execution.status !== "completed" ? { fallbackReason: capsuleInput.unresolved?.[0] ?? "Structured return unavailable." } : {}),
+        usage: execution.usage,
+        ...(execution.fallbackReason ? { fallbackReason: execution.fallbackReason }
+          : execution.status !== "completed" && execution.status !== "partial"
+            ? { fallbackReason: capsuleInput.unresolved?.[0] ?? "Structured return unavailable." } : {}),
         ...(execution.error ? { error: execution.error } : {}),
+        ...(execution.patch ? { patch: execution.patch } : {}),
+        ...(scope.runtime.dockerPolicy ? { dockerPolicy: scope.runtime.dockerPolicy } : {}),
+        ...(scope.runtime.capabilities ? { capabilities: scope.runtime.capabilities } : {}),
       };
+
+      if (execution.patch?.status === "captured" && execution.patch.blobRef) {
+        const patchArtifact = { label: "Workspace patch", ref: execution.patch.blobRef };
+        const artifacts = capsule.artifacts ? [...capsule.artifacts] : [];
+        if (!artifacts.some((a) => a.ref === execution.patch!.blobRef)) {
+          artifacts.push(patchArtifact);
+        }
+        capsule.artifacts = artifacts;
+      }
 
       await this.store.appendTrace(scope.id, "scope.return", { capsule, usage: execution.usage });
       const resultRef = await this.store.saveResult(capsule);
@@ -81,15 +131,25 @@ export class ScopeKernel {
       return capsule;
     } catch (error) {
       if (!scope) throw error;
-      const status = controller.signal.aborted ? "cancelled" : "failed";
+      const status = controller.signal.aborted && scope.runtime.state !== "cleanup-failed" ? "cancelled" : "failed";
       const message = error instanceof Error ? error.message : String(error);
       const capsule: ResultCapsule = {
         ...fallbackCapsuleInput(undefined, message),
         status,
+        context,
+        workspaceMode,
         scopeId: scope.id,
+        ...(scope.runtime.sourceRevision ? { sourceRevision: scope.runtime.sourceRevision } : {}),
         traceRef: this.store.traceRef(scope.id),
         fallbackReason: message,
         error: message,
+        ...(workspaceMode === "docker-copy" ? {
+          patch: {
+            status: "unavailable",
+            error: controller.signal.aborted ? "Runtime was cancelled before patch capture." : message,
+            ...(scope.runtime.sourceRevision ? { sourceRevision: scope.runtime.sourceRevision } : {}),
+          },
+        } : {}),
       };
       await this.store.appendTrace(scope.id, `scope.${status}`, { error: message });
       const resultRef = await this.store.saveResult(capsule);
@@ -100,7 +160,7 @@ export class ScopeKernel {
       options.signal?.removeEventListener("abort", parentAbort);
       if (this.activeAbort === controller) this.activeAbort = undefined;
       if (scratch) await scratch.dispose();
-      if (scope) {
+      if (scope && scope.runtime.state !== "cleanup-failed") {
         await this.store.appendTrace(scope.id, "runtime.disposed", {});
         await this.scopes.disposeRuntime(scope.id);
       }

@@ -1,5 +1,6 @@
 import type { ResultCapsuleInput } from "./types.js";
 
+export const MAX_CAPSULE_BYTES = 16_000;
 const MAX_SUMMARY_LENGTH = 8_000;
 const MAX_ITEM_LENGTH = 4_000;
 const MAX_ITEMS = 50;
@@ -91,18 +92,19 @@ export function validateCapsuleInput(value: unknown): CapsuleValidation {
 
   if (errors.length > 0) return { ok: false, errors };
 
-  return {
-    ok: true,
-    value: {
-      summary: (input.summary as string).slice(0, MAX_SUMMARY_LENGTH),
-      ...(conclusions ? { conclusions } : {}),
-      ...(evidence ? { evidence } : {}),
-      ...(artifacts ? { artifacts } : {}),
-      ...(decisions ? { decisions } : {}),
-      ...(unresolved ? { unresolved } : {}),
-      ...(confidence !== undefined ? { confidence } : {}),
-    },
+  const capsule: ResultCapsuleInput = {
+    summary: input.summary as string,
+    ...(conclusions ? { conclusions } : {}),
+    ...(evidence ? { evidence } : {}),
+    ...(artifacts ? { artifacts } : {}),
+    ...(decisions ? { decisions } : {}),
+    ...(unresolved ? { unresolved } : {}),
+    ...(confidence !== undefined ? { confidence } : {}),
   };
+  if (Buffer.byteLength(JSON.stringify(capsule), "utf8") > MAX_CAPSULE_BYTES) {
+    return { ok: false, errors: [`capsule may contain at most ${MAX_CAPSULE_BYTES} serialized UTF-8 bytes; shorten it and retry scope_return`] };
+  }
+  return { ok: true, value: capsule };
 }
 
 export function fallbackCapsuleInput(finalText: string | undefined, reason: string): ResultCapsuleInput {
