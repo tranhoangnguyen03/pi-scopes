@@ -5,6 +5,10 @@
 - [Product and release design](product-release-design.md): the owner's npm/VM experience, proposed decisions and release criteria.
 - [Release implementation plan](plans/2026-09-07-npm-vm-release.md): ordered work and validation gates. **This is the active plan.**
 - [Current implementation status](STATUS.md): what exists and has actually been verified.
+- [Child playground direction](child-playground-direction.md): independent agent perspectives, familiar-project ergonomics, proposed work and explicit deferrals.
+- [Compatibility inventory](compatibility.md): observed installed versions and prioritized checks, not tested compatibility.
+- [Child environment comparison](child-environment-comparison.md): Docker/Gondolin/restricted-host options; equipped-child readiness precedes warning-system work.
+- [Sandbox equipment survey](sandbox-tooling-survey.md): what E2B, OpenHands, Gondolin and Daytona provide; capability-first operating philosophy.
 - [Implementation contract](v0.1-contract.md): current behavior and limitations, not promises of future functionality.
 - [User guide](../README.md): installation and current use.
 

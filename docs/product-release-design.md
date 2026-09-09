@@ -8,6 +8,10 @@ Install a pi-scope package from npm into a VM, configure it once, and use ordina
 
 Existing extensions should keep working in the parent wherever possible. Known conflicts or missing child capabilities should be explained with impact, options and a reviewable issue-report summary. Unknown compatibility is not declared safe. Universal conflict detection is not achievable with arbitrary extensions.
 
+## Operating philosophy (owner clarification)
+
+Get out of agents' way: equip children for good work and keep initial guardrails minimal and justified. Add safeguards in response to observed failure modes, not speculative scenarios. Existing tiny capacity limits and offline/preinstalled-only operation are prototype choices, not fixed product goals. Preserve integrity/error reporting and the explicitly promised isolation boundary; resource/workflow restrictions should be reconsidered when they block ordinary work. See [sandbox equipment survey](sandbox-tooling-survey.md). This direction does not silently change current network, credential or host-access authority.
+
 ## Architecture choice
 
 Considered directions:
@@ -63,7 +67,7 @@ Test a small owner-selected set of actual extensions plus controlled collision/m
 ## Decisions before release, not before useful work
 
 - npm identity: retain `@tranhoangnguyen03/pi-scopes` or choose `pi-scope`/another name after checking availability and ownership. No rename or reservation is implied.
-- Target VM OS/architecture, Node/Pi versions, and whether nested Docker is available.
+- Owner-approved platform targets: macOS, Linux, and Windows through WSL2. Native Windows is not required for the initial release. CPU architectures, Node/Pi versions and Docker availability remain to be established. Validate macOS/Linux first, then WSL2 explicitly; a Linux pass alone is not WSL2 acceptance evidence.
 - Release execution default and one-time authority acknowledgement, particularly alongside permission extensions.
 - Owner-selected compatibility set and diagnostic disclosure preferences.
 - Release version/dist-tag, repository/issue metadata and final publication approval.
