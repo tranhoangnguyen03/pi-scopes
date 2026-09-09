@@ -23,6 +23,20 @@ Design: [product-release-design.md](../product-release-design.md). Baseline: `a2
 
 **Exit:** concrete diagnostics supported by Pi APIs, a target environment, and no implied universal compatibility. If host introspection is insufficient, prefer documented loader errors and explicit readiness failures over a new discovery framework.
 
+## Stage 1A — Equipped-child readiness gate (before diagnostics implementation)
+
+The equipped-child checkpoint has completed the initial image/policy/capture plumbing and deterministic self-project build check. This is not yet broad live-agent readiness acceptance. The next usability emphasis is a [familiar, ready playground](../child-playground-direction.md): project conventions, known baselines, Git ergonomics and reduced setup friction, rather than automatically implementing every diagnostic or advisor suggestion.
+
+See [environment comparison](../child-environment-comparison.md). Recommended starting point is the existing Docker backend with one real workload's prepared tools/dependencies; no backend switch is approved by this plan.
+
+1. Select an owner repository and deployment environment; identify actual runtime/dependency/service needs and test command.
+2. Check source/workspace/memory limits against that project before paid inference. Missing runtimes, dependencies, access and capacity are separate conditions.
+3. Agree a bounded dependency-provisioning policy and image recipe. Installation scripts execute in an isolated builder, never the host; network/secrets require deliberate policy. Network now defaults off with explicit owner bridge opt-in; further network/auth facilities remain proposals, not prerequisites.
+4. Provide a compact capability description to both parent and child; test it against actual executable/dependency availability, not declarative labels alone.
+5. Exercise ordinary task completion and existing tests, while preserving isolation/capture/cancellation. Do not choose a fixture just because it matches the old image. No automatic paid retries.
+
+Gondolin is a candidate if controlled services/network would otherwise require inventing our own infrastructure. Restricted-host execution is a separate authority decision, not a fallback. No universal extension inheritance.
+
 ## Stage 2 — Readiness and actionable diagnostics
 
 **Files:** modify `src/index.ts`, `src/child/pi-child-executor.ts`, `src/ui/format.ts` and relevant tests; create `src/core/compatibility.ts` only if logic is genuinely shared. Update `README.md`, `docs/compatibility.md`, `docs/v0.1-contract.md`.
