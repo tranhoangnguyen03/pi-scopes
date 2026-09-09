@@ -23,6 +23,7 @@ import { DockerRuntime } from "../runtime/docker.js";
 import { snapshotProject } from "../runtime/project-snapshot.js";
 import { captureWorkspacePatch } from "../runtime/workspace-patch.js";
 import { dockerBash } from "./docker-bash.js";
+import { dockerPolicy } from "../runtime/docker-policy.js";
 
 export interface ChildRunRequest {
   scope: ScopeRecord;
@@ -70,11 +71,12 @@ function childInstructions(scope: ScopeRecord, mapping?: { cwd: string; sourceRo
     `Scope ID: ${scope.id}`,
     ...(mapping ? [`Path mapping: source project ${mapping.sourceRoot} is copied to /workspace. Parent cwd ${scope.cwd} corresponds to guest cwd ${mapping.cwd}. Translate source paths accordingly.`] : []),
     scope.workspaceMode === "docker-copy"
-      ? "Workspace mode: docker-copy. All work runs in a disposable committed project copy under /workspace; no host mounts, network or automatic promotion. Only Bash and scope_return exist. Host paths in inherited text are not accessible: use the guest cwd. Read/search/edit using shell commands, not unavailable host tools."
+      ? "Workspace mode: docker-copy. All work runs in a disposable committed project copy under /workspace; no host mounts or automatic promotion. Network follows the owner policy described below. Only Bash and scope_return exist. Host paths in inherited text are not accessible: use the guest cwd. Read/search/edit using shell commands, not unavailable host tools."
       : `Workspace mode: ${scope.workspaceMode}. The workspace is shared with the parent and is not a security boundary.`,
     scope.workspaceMode === "docker-copy"
-      ? "Use /tmp for temporary files. Guest files disappear at scope end. The harness automatically captures a bounded text patch before cleanup; no backups or manual diff printing are needed. Capture may fail for unsupported files/paths or size limits, reported explicitly to the parent. Preserve other findings as command output; do not promise durable guest artifact paths. Dependencies must already be available; missing tools or dependencies require a partial result, not network installation or host fallback."
+      ? "Use /tmp for temporary files. Guest files disappear at scope end. The harness automatically captures a bounded text patch before cleanup; no backups or manual diff printing are needed. Capture may fail for unsupported files/paths or size limits, reported explicitly to the parent. Preserve other findings as command output; do not promise durable guest artifact paths. Use available package managers with project-local or /tmp installs when the owner's network policy permits. Do not use host fallback or assume parent-only tools/credentials exist; report missing access as a specific blocker."
       : `Use ${scope.runtime.scratchPath ?? "the assigned scratch directory"} for temporary scripts, downloads, and logs.`,
+    ...(scope.runtime.capabilities ? [scope.runtime.capabilities.summary] : []),
     "Investigate only the assigned goal. Preserve concrete evidence such as paths, symbols, commands, and test results.",
     scope.context === "fork"
       ? "You inherit a snapshot of the parent conversation and instructions, not live updates. Focus on the assigned goal. Parent tools/permissions are not inherited; only the currently supplied child tools are available."
@@ -113,11 +115,16 @@ export class PiChildExecutor implements ChildExecutor {
       runtime = await DockerRuntime.create(request.scope.runtime.image, async (name) => {
         request.scope.runtime.containerName = name;
         await this.store.saveScope(request.scope);
-      }, request.signal);
+      }, request.signal, request.scope.runtime.dockerPolicy);
       await this.store.appendTrace(request.scope.id, "docker.created", { name: runtime.name, image: request.scope.runtime.image });
       request.signal.throwIfAborted();
       await runtime.importDirectory(input, request.signal);
       request.signal.throwIfAborted();
+      const capabilities = await runtime.capabilities(request.scope.runtime.dockerPolicy ?? dockerPolicy({}), request.signal);
+      request.scope.runtime.capabilities = capabilities;
+      await this.store.saveScope(request.scope);
+      await this.store.appendTrace(request.scope.id, "scope.capabilities", capabilities);
+      request.onActivity?.(capabilities.summary);
       result = await this.runSession(request, { cwd: snapshot.cwd, sourceRoot: snapshot.root, guidance,
         bash: dockerBash(runtime, snapshot.cwd, this.store, request.scope.id, (error) => { commandFailure = error; }) });
       if (commandFailure && !request.signal.aborted) result = { ...result, status: "failed", error: commandFailure };

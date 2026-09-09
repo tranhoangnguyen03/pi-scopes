@@ -1,8 +1,12 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
+
+import { dockerPolicy } from "./docker-policy.js";
+import type { DockerPolicy, GuestCapabilities } from "../core/types.js";
 
 const execFileAsync = promisify(execFile);
 const OUTPUT_BYTES = 1024 * 1024;
@@ -27,7 +31,7 @@ export class DockerRuntime implements BashOperations {
     this.name = name;
   }
 
-  static async create(image: string, onAllocated?: (name: string) => Promise<void>, signal?: AbortSignal): Promise<DockerRuntime> {
+  static async create(image: string, onAllocated?: (name: string) => Promise<void>, signal?: AbortSignal, policy: DockerPolicy = dockerPolicy({})): Promise<DockerRuntime> {
     signal?.throwIfAborted();
     if (!/^sha256:[a-f0-9]{64}$/.test(image)) throw new Error("Docker image must be a complete local sha256: image ID; no pull or mutable tags.");
     // Image-declared VOLUMEs would create writable mounts outside the bounded tmpfs policy.
@@ -39,9 +43,9 @@ export class DockerRuntime implements BashOperations {
       signal?.throwIfAborted();
       await docker([
         "create", "--pull=never", "--name", runtime.name, "--label", "pi-scopes.runtime=experimental",
-        "--network=none", "--ipc=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-        "--user=65534:65534", "--pids-limit=64", "--memory=256m", "--memory-swap=256m", "--cpus=1",
-        "--tmpfs=/workspace:rw,nosuid,nodev,size=16m,mode=1777", "--tmpfs=/tmp:rw,nosuid,nodev,size=16m,mode=1777",
+        `--network=${policy.network}`, "--ipc=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+        "--user=65534:65534", `--pids-limit=${policy.pidsLimit}`, `--memory=${policy.memory}`, `--memory-swap=${policy.memory}`, `--cpus=${policy.cpus}`,
+        `--tmpfs=/workspace:rw,exec,nosuid,nodev,size=${policy.workspaceSize},mode=1777`, `--tmpfs=/tmp:rw,exec,nosuid,nodev,size=${policy.tmpSize},mode=1777`,
         "--workdir=/workspace", "--env=HOME=/tmp", "--env=BASH_ENV=/dev/null", "--env=ENV=/dev/null",
         "--no-healthcheck", "--log-driver=none", "--init", "--entrypoint=/bin/sh", image,
         "-c", "while :; do sleep 3600; done",
@@ -77,7 +81,9 @@ export class DockerRuntime implements BashOperations {
     try {
       // Docker cp refuses read-only rootfs, including tmpfs targets. Stream an owned regular-file
       // snapshot to the unprivileged guest instead; never weaken rootfs or add CHOWN capability.
-      const archive = await execFileAsync("tar", ["-cf", "-", "-C", directory, "."], {
+      // Do not archive '.' itself: it is a root-owned tmpfs mount in the guest.
+      const entries = (await readdir(directory)).map((name) => `./${name}`);
+      const archive = await execFileAsync("tar", ["--format=ustar", "-cf", "-", "-C", directory, ...(entries.length ? ["--", ...entries] : ["--files-from=/dev/null"])], {
         encoding: "buffer", maxBuffer: 16 * 1024 * 1024, timeout: 15_000, killSignal: "SIGKILL", ...(signal ? { signal } : {}),
         env: { ...process.env, TAR_OPTIONS: "", COPYFILE_DISABLE: "1" },
       });
@@ -88,19 +94,47 @@ export class DockerRuntime implements BashOperations {
     } finally { this.running = false; }
   }
 
-  async exportWorkspace(signal?: AbortSignal): Promise<Buffer> {
+  async capabilities(policy: DockerPolicy, signal: AbortSignal): Promise<GuestCapabilities> {
+    let output = "";
+    await this.exec("for tool in bash git rg jq node npm python3 pip3 uv make gcc curl tar; do if command -v \"$tool\" >/dev/null 2>&1; then printf '%s\\n' \"$tool\"; fi; done", "/workspace", { signal, timeout: 10, onData: (data) => { output += data.toString(); } });
+    const expected = ["bash", "git", "rg", "jq", "node", "npm", "python3", "pip3", "uv", "make", "gcc", "curl", "tar"];
+    const available = new Set(output.trim().split("\n"));
+    const tools = Object.fromEntries(expected.filter((name) => available.has(name)).map((name) => [name, "on PATH"]));
+    const missing = expected.filter((name) => !available.has(name));
+    return { tools, missing, network: policy.network,
+      summary: `Guest tools on PATH: ${Object.keys(tools).join(", ")}. Missing: ${missing.join(", ") || "none"}. Network: ${policy.network}. Memory ${policy.memory}, CPUs ${policy.cpus}, workspace ${policy.workspaceSize}, tmp ${policy.tmpSize}. Root read-only; workspace/tmp writable, HOME=/tmp. Use project-local installs or /tmp virtual environments/caches. Tool presence does not verify project dependencies, versions or authentication. Parent extensions are not inherited.${policy.warning ? " " + policy.warning : ""}` };
+  }
+
+  async listWorkspace(signal?: AbortSignal): Promise<string[]> {
+    if (this.closed || this.running) throw new Error("Docker listing requires an idle open runtime");
+    this.running = true;
+    try {
+      const result = await execFileAsync("docker", ["exec", "--workdir=/workspace", this.name, "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "find", ".", "-mindepth", "1", "!", "-type", "d", "-printf", "%P\\0"], {
+        encoding: "buffer", maxBuffer: 8 * 1024 * 1024, timeout: 15_000, killSignal: "SIGKILL", ...(signal ? { signal } : {}),
+      });
+      const bytes = result.stdout;
+      if (!Buffer.from(bytes.toString("utf8")).equals(bytes) || (bytes.length && bytes.at(-1) !== 0)) throw new Error("Invalid/incomplete guest path listing");
+      const paths = bytes.length ? bytes.toString().slice(0, -1).split("\0") : [];
+      if (paths.length > 100_000 || new Set(paths).size !== paths.length || paths.some((p) => !p || p.startsWith("/") || p.split("/").some((s) => !s || s === "." || s === ".." || s.toLowerCase() === ".git"))) throw new Error("Unsafe or oversized guest path listing");
+      return paths;
+    } finally { this.running = false; }
+  }
+
+  async exportWorkspace(signal?: AbortSignal, paths?: string[]): Promise<Buffer> {
     signal?.throwIfAborted();
     if (this.closed || this.running) throw new Error("Docker export requires an idle open runtime");
     this.running = true;
     try {
       signal?.throwIfAborted();
-      const pending = execFileAsync("docker", ["exec", "--workdir=/workspace", this.name, "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "tar", "--format=ustar", "-cf", "-", "-C", "/workspace", "."], {
+      const pending = execFileAsync("docker", ["exec", "-i", "--workdir=/workspace", this.name, "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "tar", "--format=ustar", "-cf", "-", "-C", "/workspace", ...(paths ? ["--null", "--verbatim-files-from", "--no-recursion", "-T", "-"] : ["."])], {
         encoding: "buffer",
         maxBuffer: 20 * 1024 * 1024,
         timeout: 15_000,
         killSignal: "SIGKILL",
         ...(signal ? { signal } : {}),
       });
+      pending.child.stdin?.on("error", () => {});
+      pending.child.stdin?.end(paths ? paths.join("\0") + (paths.length ? "\0" : "") : undefined);
       const result = await pending;
       signal?.throwIfAborted();
       return result.stdout;

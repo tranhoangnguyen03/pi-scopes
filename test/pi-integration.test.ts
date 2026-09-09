@@ -402,6 +402,29 @@ test ! -e AGENTS.md
     expect(kernel.scopes.get(capsule.scopeId)!.runtime.state).toBe("disposed");
   }, 90_000);
 
+  it("excludes ignored dependency payloads before export but never tracked changes or guest-hidden work", async () => {
+    const cwd = await committedWorkspace();
+    await writeFile(path.join(cwd, ".gitignore"), "node_modules/\n");
+    await mkdir(path.join(cwd, "node_modules"));
+    await writeFile(path.join(cwd, "node_modules", "keep.txt"), "original\n");
+    await exec("git", ["-C", cwd, "add", ".gitignore"]);
+    await exec("git", ["-C", cwd, "add", "-f", "node_modules/keep.txt"]);
+    await exec("git", ["-C", cwd, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "ignore fixture"]);
+    dockerCommand = "mkdir -p node_modules/.bin; ln -s /etc/passwd node_modules/.bin/tool; head -c 40000000 /dev/zero > node_modules/payload; printf changed > node_modules/keep.txt; printf '*\\n' > .gitignore; printf visible > visible.txt";
+    const kernel = await createKernel(cwd);
+    const capsule = await kernel.fork({ goal: "Install and edit", parent: parent() });
+    expect(capsule.status).toBe("completed");
+    const patch = await kernel.store.readEvidenceBlob(capsule.scopeId, capsule.patch!.blobRef!);
+    expect(patch).toContain("node_modules/keep.txt");
+    expect(patch).toContain("visible.txt");
+    expect(patch).not.toContain("payload");
+    expect(patch).not.toContain(".bin/tool");
+    expect(capsule.dockerPolicy).toMatchObject({ network: "none", memory: "2g", workspaceSize: "1g" });
+    expect(capsule.capabilities?.tools.bash).toBe("on PATH");
+    expect(JSON.stringify(requests)).toContain("Guest tools on PATH");
+    expect(kernel.scopes.get(capsule.scopeId)!.runtime.capabilities).toEqual(capsule.capabilities);
+  }, 90_000);
+
   it("explicitly reports no-change when guest workspace files are not modified", async () => {
     const cwd = await committedWorkspace();
     dockerCommand = "cat evidence.txt; true";
@@ -509,6 +532,10 @@ describe("real Pi integration with a local scripted provider", () => {
     vi.stubEnv("PI_SCOPES_EXECUTION", "docker");
     vi.stubEnv("PI_SCOPES_DOCKER_IMAGE", "");
     await expect(kernel.fork({ goal: "Investigate", parent: parent() })).rejects.toThrow("PI_SCOPES_DOCKER_IMAGE");
+    vi.stubEnv("PI_SCOPES_DOCKER_IMAGE", `sha256:${"a".repeat(64)}`);
+    vi.stubEnv("PI_SCOPES_DOCKER_NETWORK", "host");
+    await expect(kernel.fork({ goal: "Investigate", parent: parent() })).rejects.toThrow("PI_SCOPES_DOCKER_NETWORK");
+    vi.stubEnv("PI_SCOPES_DOCKER_NETWORK", "none");
     vi.stubEnv("PI_SCOPES_DOCKER_IMAGE", "ubuntu:latest");
     await expect(kernel.fork({ goal: "Investigate", parent: parent() })).rejects.toThrow("PI_SCOPES_DOCKER_IMAGE");
     expect(requests).toHaveLength(0);

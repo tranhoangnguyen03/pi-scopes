@@ -28,7 +28,7 @@ it("fails when Docker is unavailable rather than executing locally", async () =>
 
 describe.skipIf(!image)("real Docker boundary (explicit local image required)", () => {
   async function start() {
-    const runtime = await DockerRuntime.create(image!);
+    const runtime = await DockerRuntime.create(image!, undefined, undefined, { network: "none", memory: "256m", cpus: 1, pidsLimit: 64, workspaceSize: "16m", tmpSize: "16m" });
     runtimes.push(runtime);
     return runtime;
   }
@@ -67,6 +67,7 @@ describe.skipIf(!image)("real Docker boundary (explicit local image required)", 
       expect(probe.exitCode).toBe(0);
       expect(probe.output).toContain("protected");
       expect((await command(runtime, "cat /workspace/result")).output).toBe("saved");
+      expect((await command(runtime, "printf '#!/bin/sh\\necho executable\\n' > /workspace/check; chmod +x /workspace/check; /workspace/check")).output).toBe("executable\n");
       expect(await command(runtime, "printf error >&2; exit 42")).toEqual({ exitCode: 42, output: "error" });
       expect((await command(runtime, "true")).exitCode).toBe(0);
       expect((await command(runtime, "dd if=/dev/zero of=/workspace/fill bs=1M count=17 2>/dev/null")).exitCode).not.toBe(0);

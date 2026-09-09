@@ -112,7 +112,7 @@ function filterIgnoredPaths(repoRoot: string, paths: string[], signal?: AbortSig
       "-C", repoRoot,
       "check-ignore", "-z", "--stdin",
     ], {
-      maxBuffer: 2 * 1024 * 1024,
+      maxBuffer: 8 * 1024 * 1024, // Matches the bounded guest listing; ignored dependencies exceeded the old 2 MiB cap.
       encoding: "buffer",
       timeout: 15_000,
       killSignal: "SIGKILL",
@@ -179,18 +179,21 @@ export async function captureWorkspacePatch(options: CaptureOptions): Promise<Wo
   const { runtime, repoRoot, inputDir, sourceRevision, manifest, signal } = options;
   signal?.throwIfAborted();
 
-  const tarBuffer = await runtime.exportWorkspace(signal);
+  const paths = await runtime.listWorkspace(signal);
+  const ignoredPaths = await filterIgnoredPaths(repoRoot, paths.filter((name) => !manifest.has(name)), signal);
+  const selected = paths.filter((name) => manifest.has(name) || !ignoredPaths.has(name));
+  for (const name of selected) safePath(name);
+  if (selected.length > MAX_EXPORT_FILES) throw new Error("Docker workspace export file limit exceeded");
+  const tarBuffer = await runtime.exportWorkspace(signal, selected);
   signal?.throwIfAborted();
 
   const guestFiles = parseWorkspaceTar(tarBuffer);
+  if (guestFiles.size !== selected.length || selected.some((name) => !guestFiles.has(name))) throw new Error("Guest export does not match selected file manifest");
 
   // Classify paths
   const allPaths = new Set([...manifest.keys(), ...guestFiles.keys()]);
   const sortedPaths = [...allPaths].sort((a, b) => a.localeCompare(b));
 
-  // Determine newly added paths and check if any are ignored generated caches
-  const untrackedPaths = sortedPaths.filter((p) => !manifest.has(p) && guestFiles.has(p));
-  const ignoredPaths = await filterIgnoredPaths(repoRoot, untrackedPaths, signal);
 
   let totalAdditions = 0;
   let totalDeletions = 0;

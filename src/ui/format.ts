@@ -42,6 +42,8 @@ export function formatCapsule(capsule: ResultCapsule): string {
     ...(capsule.sourceRevision ? [`Project copy: ${capsule.sourceRevision}; guest files are not promoted or retained.`] : []),
     capsule.summary,
   ];
+  if (capsule.capabilities) lines.push(`Execution capabilities: ${capsule.capabilities.summary}`);
+  else if (capsule.dockerPolicy) lines.push(`Network: ${capsule.dockerPolicy.network}. ${capsule.dockerPolicy.warning ?? ""}`);
   if (capsule.patch) {
     if (capsule.patch.status === "captured" && capsule.patch.blobRef) {
       const stats = capsule.patch.stats

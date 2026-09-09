@@ -13,6 +13,23 @@ export interface ScopeBudget {
   maxTurns?: number;
 }
 
+export interface DockerPolicy {
+  network: "none" | "bridge";
+  memory: string;
+  cpus: number;
+  pidsLimit: number;
+  workspaceSize: string;
+  tmpSize: string;
+  warning?: string;
+}
+
+export interface GuestCapabilities {
+  tools: Record<string, string>;
+  missing: string[];
+  network: "none" | "bridge";
+  summary: string;
+}
+
 export interface ScopeRecord {
   schemaVersion: typeof SCOPE_SCHEMA_VERSION;
   id: ScopeId;
@@ -30,6 +47,8 @@ export interface ScopeRecord {
     image?: string;
     containerName?: string;
     sourceRevision?: string;
+    dockerPolicy?: DockerPolicy;
+    capabilities?: GuestCapabilities;
   };
   traceRef: string;
   resultRef?: string;
@@ -84,6 +103,8 @@ export interface ResultCapsule extends ResultCapsuleInput {
   error?: string;
   usage?: ChildUsage;
   patch?: PatchSummary;
+  dockerPolicy?: DockerPolicy;
+  capabilities?: GuestCapabilities;
 }
 
 export interface TraceEvent {
@@ -108,4 +129,6 @@ export interface ChildExecutionResult {
   error?: string;
   usage: ChildUsage;
   patch?: PatchSummary;
+  dockerPolicy?: DockerPolicy;
+  capabilities?: GuestCapabilities;
 }

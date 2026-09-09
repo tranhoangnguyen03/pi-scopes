@@ -168,6 +168,7 @@ describe("captureWorkspacePatch binary & ignore handling", () => {
       ["tracked.txt", { mode: "100644", bytes: 13 }],
     ]);
     const mockRuntime = {
+      listWorkspace: async () => ["tracked.txt"],
       exportWorkspace: async () => {
         const guestDir = await mkdtemp(path.join(os.tmpdir(), "mock-guest-"));
         try {
@@ -194,13 +195,15 @@ describe("captureWorkspacePatch binary & ignore handling", () => {
       ["app.py", { mode: "100644", bytes: 15 }],
     ]);
     const mockRuntime = {
-      exportWorkspace: async () => {
+      listWorkspace: async () => ["app.py", "__pycache__/app.pyc"],
+      exportWorkspace: async (_signal: AbortSignal, selected: string[]) => {
+        expect(selected).toEqual(["app.py"]);
         const guestDir = await mkdtemp(path.join(os.tmpdir(), "mock-guest-"));
         try {
           await writeFile(path.join(guestDir, "app.py"), "print('hello')\n");
           await mkdir(path.join(guestDir, "__pycache__"));
           await writeFile(path.join(guestDir, "__pycache__", "app.pyc"), Buffer.from([0x00, 0x01, 0x02]));
-          return (await exec("tar", ["--format=ustar", "-cf", "-", "-C", guestDir, "."], { encoding: "buffer", env: { ...process.env, COPYFILE_DISABLE: "1" } })).stdout;
+          return (await exec("tar", ["--format=ustar", "-cf", "-", "-C", guestDir, ...selected], { encoding: "buffer", env: { ...process.env, COPYFILE_DISABLE: "1" } })).stdout;
         } finally {
           await rm(guestDir, { recursive: true, force: true });
         }

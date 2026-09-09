@@ -13,7 +13,7 @@ export function dockerBash(runtime: DockerRuntime, cwd: string, store: ScopeStor
   return {
     name: "bash", label: "Isolated Bash",
     executionMode: "sequential",
-    description: "Run Bash inside an isolated copy, network off. Use shell commands for all file/search/edit work. Returns exit status (nonzero means command failure) and a bounded output tail. Captured output is retained for parent scope inspect/read. Files disappear at scope end; the harness captures a bounded workspace text patch automatically. Return other needed evidence as command output. No host paths or automatic promotion.",
+    description: "Run Bash inside an isolated copy under the owner-selected network/resource policy. Use shell commands for all file/search/edit work. Returns exit status (nonzero means command failure) and a bounded output tail. Captured output is retained for parent scope inspect/read. Files disappear at scope end; the harness captures a bounded workspace text patch automatically. Return other needed evidence as command output. No host paths or automatic promotion.",
     promptSnippet: "Run commands and file operations inside the isolated project copy",
     parameters,
     async execute(_id, args, signal, onUpdate) {

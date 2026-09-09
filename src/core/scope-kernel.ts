@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { dockerPolicy } from "../runtime/docker-policy.js";
 import { fallbackCapsuleInput } from "./capsule.js";
 import type { ChildExecutor } from "../child/pi-child-executor.js";
 import type { ContextMode, ResultCapsule, ScopeRecord } from "./types.js";
@@ -46,6 +47,7 @@ export class ScopeKernel {
     const image = execution === "docker" ? process.env.PI_SCOPES_DOCKER_IMAGE : undefined;
     if (execution === "docker" && (!image || !/^sha256:[a-f0-9]{64}$/.test(image))) throw new Error("Docker mode requires PI_SCOPES_DOCKER_IMAGE set to a complete local sha256: image ID; no mutable tags or automatic pulls.");
     const workspaceMode = execution === "docker" ? "docker-copy" : "host-shared";
+    const policy = execution === "docker" ? dockerPolicy() : undefined;
 
     const context = options.context ?? "fresh";
     if (context !== "fresh" && context !== "fork") throw new Error("context must be fresh or fork");
@@ -72,6 +74,10 @@ export class ScopeKernel {
       const scratchPath = this.store.scratchPath(scopeId);
       scratch = await acquireScratch(scratchPath);
       scope = await this.scopes.createChild(scopeId, goal, timeoutMs, scratchPath, maxTurns, context, workspaceMode, image);
+      if (policy) {
+        scope.runtime.dockerPolicy = policy;
+        await this.store.saveScope(scope);
+      }
       await this.store.appendTrace(scope.id, "scope.fork", {
         parentId: scope.parentId,
         goal: scope.goal,
@@ -106,6 +112,8 @@ export class ScopeKernel {
             ? { fallbackReason: capsuleInput.unresolved?.[0] ?? "Structured return unavailable." } : {}),
         ...(execution.error ? { error: execution.error } : {}),
         ...(execution.patch ? { patch: execution.patch } : {}),
+        ...(scope.runtime.dockerPolicy ? { dockerPolicy: scope.runtime.dockerPolicy } : {}),
+        ...(scope.runtime.capabilities ? { capabilities: scope.runtime.capabilities } : {}),
       };
 
       if (execution.patch?.status === "captured" && execution.patch.blobRef) {

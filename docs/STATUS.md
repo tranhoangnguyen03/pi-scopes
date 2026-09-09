@@ -10,14 +10,22 @@
 - `scope({action:"run", context:"fresh"|"fork", goal})`. Fresh defaults to applicable project guidance; fork inherits the active conversation snapshot/effective instructions, not parent tools or permission hooks.
 - **Host execution remains the default and is unrestricted.** Owner environment can select **Docker-copy execution**; the model cannot choose host fallback.
 - Docker receives a clean committed project copy under `/workspace`, not a mount of the parent checkout. All child file/command work uses isolated Bash; host-backed file tools are absent. Both fresh and fork are tested through the real SDK.
-- Child edits affect only the copy. No network or automatic promotion. A bounded workspace text patch is captured automatically before disposal and exposed through existing inspect/read; other findings survive as command output and capsules. Guest paths alone are not durable artifacts.
+- Child edits affect only the copy. Network defaults off, with explicit owner bridge opt-in; no automatic promotion. A bounded workspace text patch is captured automatically before disposal and exposed through existing inspect/read; other findings survive as command output and capsules. Guest paths alone are not durable artifacts.
 - Default eight investigation turns, up to two return-only turns, explicit partial outcomes, cancellation and combined parent/child usage accounting.
 - Parent can inspect/read bounded retained evidence after container and scratch cleanup. Owned Docker output blobs preserve raw capture plus exit/failure metadata without SDK host temporary files.
 - Container identity is persisted before creation. Verified cleanup precedes normal return. Cleanup failure is visible, blocks new launches and is reconciled on session reload/reopen rather than silently relabelled disposed.
 
 [Configuration and usage](../README.md#optional-isolated-execution) · [Exact contract](v0.1-contract.md#docker-copy-execution) · [Implementation record](plans/2026-09-07-isolated-delegation.md)
 
-## Reviewed local checkpoint
+## Equipped-child milestone (latest checkpoint)
+
+- Added a packaged developer-image recipe, owner-controlled network/resources, and persisted on-PATH capability summaries for parent and child. Extensions are still not inherited; no new agent-facing tool or communication service.
+- Real dependency installation exposed and fixed root-mount permission changes during import, non-executable tmpfs blocking installed tools, and the old 2 MiB ignore-output bound. Ignored dependencies are filtered before archive export; tracked changes remain included.
+- Fresh verification: TypeScript passed; **133/133 tests passed with the new Docker image**. Inside the guest, pi-scopes installed 308 dependencies, typechecked, passed 101 tests (32 Docker-dependent skips), and retained a correct no-change result. Runtime cleanup completed. No paid model inference or independent external review in this round.
+- Evidence: `../pi-scopes-evals/equipped-child-check-4/results.json` in the owner's sibling evaluation workspace; earlier failed attempts retained separately. Local image `pi-scopes-dev:local`, ID `sha256:b30fdc94baa06928637744b94b8bb9ca1776217a36cab5007015d0a9e85d0357`.
+- This removes a practical environment blocker, not the remaining release gaps: extension coexistence diagnostics, ordinary end-to-end agent usability, and npm release readiness still need work. See [setup and limitations](../docker/README.md).
+
+## Reviewed local checkpoint (prior)
 
 [Review and disposition](plans/2026-09-07-reviewed-checkpoint.md): AGY read-only review completed; driver reproduced and fixed missing cancellation patch metadata in evidence inspection. Fresh full Docker-enabled suite: **125 passed**, plus TypeScript, diff and packaging checks. No new paid inference, publication or push. Compact diffs remain deferred; next use is ordinary experimental work rather than another feature cycle.
 
@@ -71,7 +79,7 @@ Owner policy remains output quality versus best-effort combined dollars, with un
 
 ## Next meaningful work
 
-1. Execute Stage 1 of the active release plan: supported Pi compatibility observations, target VM and owner-selected extensions, then authority/default decisions. No speculative universal conflict detection.
+1. Equip the child for an actual owner workload before implementing more warnings: [Docker/Gondolin/restricted-host comparison](child-environment-comparison.md), active plan Stage 1A. Recommendation: retain Docker initially, validate tools/dependencies/capacity and agree provisioning. No backend switch or network-policy change yet. Read-only compatibility inventory is recorded; runtime coexistence remains untested.
 2. Add actionable diagnostics and validate ordinary main-agent task completion, including the gap between a retained Docker patch and an applied result. Preserve existing authority boundaries.
 3. Test the exact candidate in the target VM, obtain separate publication approval, and verify registry installation. Use real work to choose fixes; compact-diff optimization stays deferred.
 
